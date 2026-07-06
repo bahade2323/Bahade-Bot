@@ -11,11 +11,11 @@ const {
     ButtonBuilder,
     ButtonStyle,
     EmbedBuilder,
-    ModalBuilder,        // Added for form popup
-    TextInputBuilder,    // Added for form fields
-    TextInputStyle,      // Added for text sizing styles
-    ChannelType,         // Added for setting up private text channels
-    PermissionsBitField  // Added for assigning private ticket permissions
+    ModalBuilder,        
+    TextInputBuilder,    
+    TextInputStyle,      
+    ChannelType,         
+    PermissionsBitField  
 } = require('discord.js');
 
 // ==================== KEEP-ALIVE WEB SERVER ====================
@@ -35,6 +35,7 @@ app.listen(PORT, () => {
 const SPECIFIC_CHANNEL_ID = "1522803202075132025"; 
 const VERIFY_ROLE_ID = "1522516985974624317";     
 const STAFF_ROLE_ID = "1522516757607223396";      
+const TICKET_CATEGORY_ID = "1523675506111811656"; // 📁 Tickets will be created under this category
 // ===========================================================
 
 const client = new Client({
@@ -54,7 +55,7 @@ const commands = [
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
     new SlashCommandBuilder()
-        .setName('setuptickets') // NEW: Slash command for ticket panels
+        .setName('setuptickets') 
         .setDescription('Spawns the Premium Support ticket panel with an Open Ticket button.')
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
@@ -126,7 +127,6 @@ client.on('interactionCreate', async interaction => {
             await interaction.channel.send({ embeds: [embed], components: [row] });
         }
 
-        // NEW: Ticket Command setup panel generator
         if (commandName === 'setuptickets') {
             const embed = new EmbedBuilder()
                 .setTitle('🎟️ BAHADE HUB PREMIUM SUPPORT 🎟️')
@@ -189,7 +189,6 @@ client.on('interactionCreate', async interaction => {
             await interaction.reply({ content: '✅ You have been successfully verified and granted access!', ephemeral: true });
         }
 
-        // NEW: Handles clicking the open ticket button to trigger the popup Modal form
         if (interaction.customId === 'open_ticket_btn') {
             const modal = new ModalBuilder()
                 .setCustomId('ticket_form_modal')
@@ -224,58 +223,120 @@ client.on('interactionCreate', async interaction => {
 
             return await interaction.showModal(modal);
         }
+
+        // NEW: Instantly close ticket button logic
+        if (interaction.customId === 'close_ticket_instantly') {
+            const isStaff = interaction.member.roles.cache.has(STAFF_ROLE_ID) || interaction.member.permissions.has(PermissionFlagsBits.Administrator);
+            if (!isStaff) return interaction.reply({ content: '❌ Only staff can close tickets.', ephemeral: true });
+
+            await interaction.reply({ content: '🔒 Closing ticket environment in 5 seconds...' });
+            setTimeout(async () => {
+                await interaction.channel.delete().catch(() => {});
+            }, 5000);
+        }
+
+        // NEW: Triggers modal popup for close reason
+        if (interaction.customId === 'close_ticket_with_reason') {
+            const isStaff = interaction.member.roles.cache.has(STAFF_ROLE_ID) || interaction.member.permissions.has(PermissionFlagsBits.Administrator);
+            if (!isStaff) return interaction.reply({ content: '❌ Only staff can close tickets.', ephemeral: true });
+
+            const modal = new ModalBuilder()
+                .setCustomId('close_reason_modal')
+                .setTitle('Close Ticket Reason');
+
+            const reasonInput = new TextInputBuilder()
+                .setCustomId('close_reason_input')
+                .setLabel('Reason for closing:')
+                .setPlaceholder('e.g., Issue resolved / Finished handling transaction.')
+                .setStyle(TextInputStyle.Paragraph)
+                .setRequired(true);
+
+            modal.addComponents(new ActionRowBuilder().addComponents(reasonInput));
+            return await interaction.showModal(modal);
+        }
     }
 
-    // 3. NEW: MODAL FORM SUBMISSION HANDLER
-    if (interaction.isModalSubmit() && interaction.customId === 'ticket_form_modal') {
-        await interaction.deferReply({ ephemeral: true });
+    // 3. MODAL SUBMISSIONS
+    if (interaction.isModalSubmit()) {
+        // Ticket Form Modal Handler
+        if (interaction.customId === 'ticket_form_modal') {
+            await interaction.deferReply({ ephemeral: true });
 
-        const robloxUser = interaction.fields.getTextInputValue('form_roblox_user');
-        const keyType = interaction.fields.getTextInputValue('form_key_type');
-        const reason = interaction.fields.getTextInputValue('form_reason');
+            const robloxUser = interaction.fields.getTextInputValue('form_roblox_user');
+            const keyType = interaction.fields.getTextInputValue('form_key_type');
+            const reason = interaction.fields.getTextInputValue('form_reason');
 
-        const guild = interaction.guild;
-        const channelName = `ticket-${interaction.user.username}`;
+            const guild = interaction.guild;
+            const channelName = `ticket-${interaction.user.username}`;
 
-        try {
-            // Generates completely secure and isolated channels inside your discord server
-            const ticketChannel = await guild.channels.create({
-                name: channelName,
-                type: ChannelType.GuildText,
-                permissionOverwrites: [
-                    {
-                        id: guild.roles.everyone.id,
-                        deny: [PermissionsBitField.Flags.ViewChannel],
-                    },
-                    {
-                        id: interaction.user.id,
-                        allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
-                    },
-                    {
-                        id: STAFF_ROLE_ID,
-                        allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
-                    }
-                ],
-            });
+            try {
+                const ticketChannel = await guild.channels.create({
+                    name: channelName,
+                    type: ChannelType.GuildText,
+                    parent: TICKET_CATEGORY_ID, // 📁 Forces creation inside your exact category id
+                    permissionOverwrites: [
+                        {
+                            id: guild.roles.everyone.id,
+                            deny: [PermissionsBitField.Flags.ViewChannel],
+                        },
+                        {
+                            id: interaction.user.id,
+                            allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
+                        },
+                        {
+                            id: STAFF_ROLE_ID,
+                            allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
+                        }
+                    ],
+                });
 
-            const ticketEmbed = new EmbedBuilder()
-                .setTitle('🎟️ Support Ticket Form Summary')
-                .setDescription(`Welcome ${interaction.user}. A support representative will review your profile shortly. Here are your transaction details:`)
-                .addFields(
-                    { name: '👤 Roblox Username', value: `\`${robloxUser}\``, inline: true },
-                    { name: '🔑 Key Status', value: `\`${keyType}\``, inline: true },
-                    { name: '📝 Reason Provided', value: reason }
-                )
-                .setColor(0x2F3136)
-                .setTimestamp();
+                const ticketEmbed = new EmbedBuilder()
+                    .setTitle('🎟️ Support Ticket Form Summary')
+                    .setDescription(`Welcome ${interaction.user}. A support representative will review your profile shortly. Here are your transaction details:`)
+                    .addFields(
+                        { name: '👤 Roblox Username', value: `\`${robloxUser}\``, inline: true },
+                        { name: '🔑 Key Status', value: `\`${keyType}\``, inline: true },
+                        { name: '📝 Reason Provided', value: reason }
+                    )
+                    .setColor(0x2F3136)
+                    .setTimestamp();
 
-            // Pings your management staff automatically inside the text channel wrapper
-            await ticketChannel.send({ content: `${interaction.user} | <@&${STAFF_ROLE_ID}>`, embeds: [ticketEmbed] });
-            await interaction.editReply({ content: `✅ Form received successfully! Your ticket channel is ready here: ${ticketChannel}` });
+                // NEW: Adds the ActionRow holding the Close options directly into the Ticket channel layout
+                const managementRow = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder()
+                        .setCustomId('close_ticket_instantly')
+                        .setLabel('Close')
+                        .setStyle(ButtonStyle.Danger)
+                        .setEmoji('🔒'),
+                    new ButtonBuilder()
+                        .setCustomId('close_ticket_with_reason')
+                        .setLabel('Close with Reason')
+                        .setStyle(ButtonStyle.Secondary)
+                        .setEmoji('📝')
+                );
 
-        } catch (error) {
-            console.error("Failed to generate custom private ticket thread:", error);
-            await interaction.editReply({ content: `❌ Critical system error occurred while preparing your channel environment.` });
+                await ticketChannel.send({ 
+                    content: `${interaction.user} | <@&${STAFF_ROLE_ID}>`, 
+                    embeds: [ticketEmbed],
+                    components: [managementRow] 
+                });
+                
+                await interaction.editReply({ content: `✅ Form received successfully! Your ticket channel is ready here: ${ticketChannel}` });
+
+            } catch (error) {
+                console.error("Failed to generate custom private ticket thread:", error);
+                await interaction.editReply({ content: `❌ Critical system error occurred while preparing your channel environment.` });
+            }
+        }
+
+        // NEW: Handles the close reason input submission pipeline
+        if (interaction.customId === 'close_reason_modal') {
+            const closeReason = interaction.fields.getTextInputValue('close_reason_input');
+            await interaction.reply({ content: `🔒 Ticket closed by staff.\n**Reason:** ${closeReason}\n\n*Deleting channel in 5 seconds...*` });
+            
+            setTimeout(async () => {
+                await interaction.channel.delete().catch(() => {});
+            }, 5000);
         }
     }
 });
