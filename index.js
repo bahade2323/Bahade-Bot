@@ -10,14 +10,18 @@ const {
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
-    EmbedBuilder
+    EmbedBuilder,
+    ModalBuilder,        // Added for form popup
+    TextInputBuilder,    // Added for form fields
+    TextInputStyle,      // Added for text sizing styles
+    ChannelType,         // Added for setting up private text channels
+    PermissionsBitField  // Added for assigning private ticket permissions
 } = require('discord.js');
 
 // ==================== KEEP-ALIVE WEB SERVER ====================
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Base route that Render or an external ping monitor can hit
 app.get('/', (req, res) => {
     res.send('🤖 Bahade Hub Bot is alive and operational 24/7!');
 });
@@ -28,9 +32,9 @@ app.listen(PORT, () => {
 // ===============================================================
 
 // ==================== BOT CONFIGURATION ====================
-const SPECIFIC_CHANNEL_ID = "1522803202075132025"; // Chatting here triggers auto-ban + purge
-const VERIFY_ROLE_ID = "1522516985974624317";     // Given when clicking Verify Button
-const STAFF_ROLE_ID = "1522516757607223396";      // Staff Role Allowed to Moderate
+const SPECIFIC_CHANNEL_ID = "1522803202075132025"; 
+const VERIFY_ROLE_ID = "1522516985974624317";     
+const STAFF_ROLE_ID = "1522516757607223396";      
 // ===========================================================
 
 const client = new Client({
@@ -47,6 +51,11 @@ const commands = [
     new SlashCommandBuilder()
         .setName('setuprules')
         .setDescription('Spawns the BAHADE HUB rules embed with a Verify button.')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+    new SlashCommandBuilder()
+        .setName('setuptickets') // NEW: Slash command for ticket panels
+        .setDescription('Spawns the Premium Support ticket panel with an Open Ticket button.')
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
     new SlashCommandBuilder()
@@ -83,11 +92,13 @@ client.once('ready', async () => {
 
 // --- CORE INTERACTION HANDLER ---
 client.on('interactionCreate', async interaction => {
+    
+    // 1. CHAT SLASH COMMANDS
     if (interaction.isChatInputCommand()) {
         const { commandName, options, member } = interaction;
         const isStaff = member.roles.cache.has(STAFF_ROLE_ID) || member.permissions.has(PermissionFlagsBits.Administrator);
 
-        if ((commandName === 'ban' || commandName === 'kick' || commandName === 'setuprules') && !isStaff) {
+        if ((commandName === 'ban' || commandName === 'kick' || commandName === 'setuprules' || commandName === 'setuptickets') && !isStaff) {
             return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
         }
 
@@ -97,22 +108,10 @@ client.on('interactionCreate', async interaction => {
                 .setDescription('*Follow these rules or get banned. Simple as that.*')
                 .setColor(0x00FF00)
                 .addFields(
-                    { 
-                        name: '💬 1. CHAT & CONDUCT', 
-                        value: '• **Be Respectful:** No toxicity, racism, or hate speech.\n• **No Spamming:** Keep chat clean and use bot commands in the proper channel.\n• **No Pinging:** Do not ping developers or staff.' 
-                    },
-                    { 
-                        name: '💾 2. SCRIPTS & SAFETY', 
-                        value: '• **No Links:** Do not share external scripts, executors, or malware links.\n• **No Leaking:** Do not crack, share, or bypass premium keys/scripts.' 
-                    },
-                    { 
-                        name: '🛠️ 3. SUPPORT', 
-                        value: '• **No DMs:** Do not DM staff for help. Open a ticket in the support channel.\n• **Show Proof:** Send screenshots/error logs when reporting a script bug.' 
-                    },
-                    { 
-                        name: '⚠️ DISCLAIMER', 
-                        value: 'Scripting carries ban risks. Always use an **ALT ACCOUNT**. We are not responsible for lost game accounts.' 
-                    }
+                    { name: '💬 1. CHAT & CONDUCT', value: '• **Be Respectful:** No toxicity, racism, or hate speech.\n• **No Spamming:** Keep chat clean and use bot commands in the proper channel.\n• **No Pinging:** Do not ping developers or staff.' },
+                    { name: '💾 2. SCRIPTS & SAFETY', value: '• **No Links:** Do not share external scripts, executors, or malware links.\n• **No Leaking:** Do not crack, share, or bypass premium keys/scripts.' },
+                    { name: '🛠️ 3. SUPPORT', value: '• **No DMs:** Do not DM staff for help. Open a ticket in the support channel.\n• **Show Proof:** Send screenshots/error logs when reporting a script bug.' },
+                    { name: '⚠️ DISCLAIMER', value: 'Scripting carries ban risks. Always use an **ALT ACCOUNT**. We are not responsible for lost game accounts.' }
                 )
                 .setFooter({ text: 'Click the green button below to verify and get access!' });
 
@@ -124,6 +123,26 @@ client.on('interactionCreate', async interaction => {
             );
 
             await interaction.reply({ content: 'Rules panel deployed successfully!', ephemeral: true });
+            await interaction.channel.send({ embeds: [embed], components: [row] });
+        }
+
+        // NEW: Ticket Command setup panel generator
+        if (commandName === 'setuptickets') {
+            const embed = new EmbedBuilder()
+                .setTitle('🎟️ BAHADE HUB PREMIUM SUPPORT 🎟️')
+                .setDescription('Need support regarding your custom Robux transaction, missing keys, or script activation?\n\nClick the button below to submit your support request form.')
+                .setColor(0x5865F2)
+                .setFooter({ text: 'A private support channel will be made for you.' });
+
+            const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId('open_ticket_btn')
+                    .setLabel('Open Ticket')
+                    .setStyle(ButtonStyle.Primary)
+                    .setEmoji('🎟️')
+            );
+
+            await interaction.reply({ content: 'Ticket deployment panel active!', ephemeral: true });
             await interaction.channel.send({ embeds: [embed], components: [row] });
         }
 
@@ -156,6 +175,7 @@ client.on('interactionCreate', async interaction => {
         }
     }
 
+    // 2. BUTTON INTERACTIONS
     if (interaction.isButton()) {
         if (interaction.customId === 'verify_button') {
             const role = interaction.guild.roles.cache.get(VERIFY_ROLE_ID);
@@ -167,6 +187,95 @@ client.on('interactionCreate', async interaction => {
 
             await interaction.member.roles.add(role);
             await interaction.reply({ content: '✅ You have been successfully verified and granted access!', ephemeral: true });
+        }
+
+        // NEW: Handles clicking the open ticket button to trigger the popup Modal form
+        if (interaction.customId === 'open_ticket_btn') {
+            const modal = new ModalBuilder()
+                .setCustomId('ticket_form_modal')
+                .setTitle('Premium Support Form');
+
+            const robloxUserInput = new TextInputBuilder()
+                .setCustomId('form_roblox_user')
+                .setLabel('Roblox Username:')
+                .setPlaceholder('e.g., Shouta_Kun15')
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true);
+
+            const keyTypeInput = new TextInputBuilder()
+                .setCustomId('form_key_type')
+                .setLabel('Key:')
+                .setPlaceholder('e.g., 30 Days Key, Lifetime Key')
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true);
+
+            const reasonInput = new TextInputBuilder()
+                .setCustomId('form_reason')
+                .setLabel('Reason:')
+                .setPlaceholder('Provide a description detailing why you are opening a ticket...')
+                .setStyle(TextInputStyle.Paragraph)
+                .setRequired(true);
+
+            modal.addComponents(
+                new ActionRowBuilder().addComponents(robloxUserInput),
+                new ActionRowBuilder().addComponents(keyTypeInput),
+                new ActionRowBuilder().addComponents(reasonInput)
+            );
+
+            return await interaction.showModal(modal);
+        }
+    }
+
+    // 3. NEW: MODAL FORM SUBMISSION HANDLER
+    if (interaction.isModalSubmit() && interaction.customId === 'ticket_form_modal') {
+        await interaction.deferReply({ ephemeral: true });
+
+        const robloxUser = interaction.fields.getTextInputValue('form_roblox_user');
+        const keyType = interaction.fields.getTextInputValue('form_key_type');
+        const reason = interaction.fields.getTextInputValue('form_reason');
+
+        const guild = interaction.guild;
+        const channelName = `ticket-${interaction.user.username}`;
+
+        try {
+            // Generates completely secure and isolated channels inside your discord server
+            const ticketChannel = await guild.channels.create({
+                name: channelName,
+                type: ChannelType.GuildText,
+                permissionOverwrites: [
+                    {
+                        id: guild.roles.everyone.id,
+                        deny: [PermissionsBitField.Flags.ViewChannel],
+                    },
+                    {
+                        id: interaction.user.id,
+                        allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
+                    },
+                    {
+                        id: STAFF_ROLE_ID,
+                        allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
+                    }
+                ],
+            });
+
+            const ticketEmbed = new EmbedBuilder()
+                .setTitle('🎟️ Support Ticket Form Summary')
+                .setDescription(`Welcome ${interaction.user}. A support representative will review your profile shortly. Here are your transaction details:`)
+                .addFields(
+                    { name: '👤 Roblox Username', value: `\`${robloxUser}\``, inline: true },
+                    { name: '🔑 Key Status', value: `\`${keyType}\``, inline: true },
+                    { name: '📝 Reason Provided', value: reason }
+                )
+                .setColor(0x2F3136)
+                .setTimestamp();
+
+            // Pings your management staff automatically inside the text channel wrapper
+            await ticketChannel.send({ content: `${interaction.user} | <@&${STAFF_ROLE_ID}>`, embeds: [ticketEmbed] });
+            await interaction.editReply({ content: `✅ Form received successfully! Your ticket channel is ready here: ${ticketChannel}` });
+
+        } catch (error) {
+            console.error("Failed to generate custom private ticket thread:", error);
+            await interaction.editReply({ content: `❌ Critical system error occurred while preparing your channel environment.` });
         }
     }
 });
