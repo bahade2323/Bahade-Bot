@@ -80,7 +80,7 @@ const commands = [
         .addIntegerOption(option => option.setName('amount').setDescription('Number of messages to clear (1-100)').setRequired(true).setMinValue(1).setMaxValue(100))
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
 
-    // ==================== NEW/UPDATED COMPLETE GIVEAWAY COMMANDS STRUCTURE ====================
+    // ==================== COMPLETE GIVEAWAY COMMANDS STRUCTURE ====================
     new SlashCommandBuilder()
         .setName('giveaway')
         .setDescription('Giveaway automated management suite')
@@ -144,7 +144,7 @@ client.on('interactionCreate', async interaction => {
 
         if (commandName === 'setuprules') {
             const embed = new EmbedBuilder()
-                .setTitle('👑 BAHADE HUB RULES 👑')
+                .setTitle('👑 MIWA HUB RULES 👑')
                 .setDescription('*Follow these rules or get banned. Simple as that.*')
                 .setColor(0x00FF00)
                 .addFields(
@@ -226,12 +226,12 @@ client.on('interactionCreate', async interaction => {
             }
         }
 
-        // ==================== REFACTORED WORKER: /GIVEAWAY [SUBCOMMANDS] ====================
+        // ==================== GIVEAWAY [SUBCOMMANDS SUITE] ====================
         if (commandName === 'giveaway') {
             const subcommand = options.getSubcommand();
 
             // ------------------------------------------
-            // METHOD: START
+            // METHOD: START (WITH VERIFIED ROLE PING)
             // ------------------------------------------
             if (subcommand === 'start') {
                 const prize = options.getString('prize');
@@ -243,7 +243,7 @@ client.on('interactionCreate', async interaction => {
                 const endTime = Math.floor((Date.now() + duration * 60 * 1000) / 1000);
 
                 const giveawayEmbed = new EmbedBuilder()
-                    .setTitle('🎁 BAHADE HUB GIVEAWAY 🎁')
+                    .setTitle('🎁 MIWA HUB GIVEAWAY 🎁')
                     .setDescription(`**Prize:** ${prize}\n\n**Winners:** ${winnerCount}\n**Ends:** <t:${endTime}:R> (<t:${endTime}:f>)\n**Hosted By:** ${interaction.user}`)
                     .setColor(0xFEE75C)
                     .setTimestamp()
@@ -257,9 +257,14 @@ client.on('interactionCreate', async interaction => {
                         .setEmoji('🎉')
                 );
 
-                const giveawayMessage = await interaction.channel.send({ embeds: [giveawayEmbed], components: [joinRow] });
+                // Modified layout generation context string to ping the exact Verification status role
+                const giveawayMessage = await interaction.channel.send({ 
+                    content: `🎉 **Giveaway Alert!** <@&${VERIFY_ROLE_ID}>`, 
+                    embeds: [giveawayEmbed], 
+                    components: [joinRow] 
+                });
                 
-                // Clear and schedule core timing resolution
+                // Core timing resolution cycle configuration
                 const giveawayTimer = setTimeout(async () => {
                     const giveawayData = activeGiveaways.get(giveawayMessage.id);
                     if (!giveawayData || giveawayData.ended) return;
@@ -292,18 +297,17 @@ client.on('interactionCreate', async interaction => {
                             .setEmoji('🔒')
                     );
 
-                    await giveawayMessage.edit({ embeds: [endEmbed], components: [disabledRow] }).catch(() => {});
+                    await giveawayMessage.edit({ content: '🎉 **Giveaway Ended!**', embeds: [endEmbed], components: [disabledRow] }).catch(() => {});
 
                     if (chosenWinners.length > 0) {
-                        await giveawayMessage.reply(`🎉 Congratulations ${chosenWinners.join(', ')}! You won **${giveawayData.prize}**!`).catch(() => {});
+                        await giveawayMessage.reply(`🎉 Congratulations ${chosenWinners.join(', ')}! You won the **${giveawayData.prize}**!`).catch(() => {});
                     } else {
                         await giveawayMessage.reply('❌ The giveaway ended, but no entries were logged.').catch(() => {});
                     }
 
-                    // Leave database profile logs untouched to allow future /reroll lookups
                 }, duration * 60 * 1000);
 
-                // Set up baseline data tree
+                // Cache active configuration state parameters
                 activeGiveaways.set(giveawayMessage.id, {
                     prize,
                     winnerCount,
@@ -371,7 +375,6 @@ client.on('interactionCreate', async interaction => {
                     return interaction.editReply('❌ This giveaway has already ended and cannot be canceled.');
                 }
 
-                // Unschedule global node timeouts loop instantly to prevent delayed payouts execution leaks
                 clearTimeout(giveawayData.timer);
 
                 const targetChannel = await interaction.guild.channels.fetch(giveawayData.channelId).catch(() => null);
@@ -391,7 +394,7 @@ client.on('interactionCreate', async interaction => {
                                 .setStyle(ButtonStyle.Danger)
                                 .setDisabled(true)
                         );
-                        await targetMsg.edit({ embeds: [cancelEmbed], components: [disabledRow] }).catch(() => {});
+                        await targetMsg.edit({ content: '🛑 **Giveaway Canceled**', embeds: [cancelEmbed], components: [disabledRow] }).catch(() => {});
                     }
                 }
 
@@ -423,7 +426,7 @@ client.on('interactionCreate', async interaction => {
             const robloxUserInput = new TextInputBuilder()
                 .setCustomId('form_roblox_user')
                 .setLabel('Roblox Username:')
-                .setPlaceholder('e.g., Shouta_Kun15')
+                .setPlaceholder('e.g., MyRobloxName')
                 .setStyle(TextInputStyle.Short)
                 .setRequired(true);
 
@@ -453,7 +456,7 @@ client.on('interactionCreate', async interaction => {
         if (interaction.customId === 'join_giveaway') {
             const giveawayData = activeGiveaways.get(interaction.message.id);
             if (!giveawayData) return interaction.reply({ content: '❌ Error: Giveaway configuration could not be loaded from memory.', ephemeral: true });
-            if (giveawayData.ended) return interaction.reply({ content: '❌ This giveaway event has already structural closed processing pipelines.', ephemeral: true });
+            if (giveawayData.ended) return interaction.reply({ content: '❌ This giveaway event has already closed processing pipelines.', ephemeral: true });
 
             if (giveawayData.entrants.has(interaction.user.id)) {
                 giveawayData.entrants.delete(interaction.user.id);
