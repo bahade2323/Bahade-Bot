@@ -20,7 +20,8 @@
   },
   "homepage": "https://github.com/bahade2323/Bahade-Bot#readme",
   "dependencies": {
-    "discord.js": "^14.26.4",
+    "discord-giveaways": "^6.0.1",
+    "discord.js": "^14.26.5",
     "dotenv": "^17.4.2",
     "express": "^5.2.1"
   }
