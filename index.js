@@ -36,6 +36,7 @@ const SPECIFIC_CHANNEL_ID = "1522803202075132025";
 const VERIFY_ROLE_ID = "1522516985974624317";     
 const STAFF_ROLE_ID = "1522516757607223396";      
 const TICKET_CATEGORY_ID = "1523675506111811656"; // 📁 Tickets will be created under this category
+const AUTO_REACT_CHANNEL_ID = "1525590338104725564"; // ⭐ Star react channel
 // ===========================================================
 
 const client = new Client({
@@ -71,7 +72,21 @@ const commands = [
         .setDescription('Kicks a user from the server.')
         .addUserOption(option => option.setName('target').setDescription('The user to kick').setRequired(true))
         .addStringOption(option => option.setName('reason').setDescription('Reason for the kick'))
-        .setDefaultMemberPermissions(PermissionFlagsBits.KickMembers)
+        .setDefaultMemberPermissions(PermissionFlagsBits.KickMembers),
+
+    new SlashCommandBuilder()
+        .setName('purge')
+        .setDescription('Bulk deletes a specified number of messages from the channel.')
+        .addIntegerOption(option => option.setName('amount').setDescription('Number of messages to clear (1-100)').setRequired(true).setMinValue(1).setMaxValue(100))
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
+
+    new SlashCommandBuilder()
+        .setName('giveaway')
+        .setDescription('Starts a giveaway inside the server.')
+        .addStringOption(option => option.setName('prize').setDescription('What is the giveaway prize?').setRequired(true))
+        .addIntegerOption(option => option.setName('duration').setDescription('Giveaway duration in minutes').setRequired(true).setMinValue(1))
+        .addIntegerOption(option => option.setName('winners').setDescription('Number of possible winners').setRequired(true).setMinValue(1))
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageEvents)
 ];
 
 // Register slash commands globally when client connects
@@ -91,6 +106,9 @@ client.once('ready', async () => {
     }
 });
 
+// Cache map to store active giveaway entrants dynamically in memory
+const activeGiveaways = new Map();
+
 // --- CORE INTERACTION HANDLER ---
 client.on('interactionCreate', async interaction => {
     
@@ -99,8 +117,10 @@ client.on('interactionCreate', async interaction => {
         const { commandName, options, member } = interaction;
         const isStaff = member.roles.cache.has(STAFF_ROLE_ID) || member.permissions.has(PermissionFlagsBits.Administrator);
 
-        if ((commandName === 'ban' || commandName === 'kick' || commandName === 'setuprules' || commandName === 'setuptickets') && !isStaff) {
-            return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+        // Staff protection check for commands
+        const staffCommands = ['ban', 'kick', 'setuprules', 'setuptickets', 'purge', 'giveaway'];
+        if (staffCommands.includes(commandName) && !isStaff) {
+            return interaction.reply({ content: '❌ You do not have permission to use this staff command.', ephemeral: true });
         }
 
         if (commandName === 'setuprules') {
@@ -173,6 +193,101 @@ client.on('interactionCreate', async interaction => {
             await targetMember.kick(`Moderator: ${interaction.user.tag} | Reason: ${reason}`);
             await interaction.reply({ content: `✅ Successfully kicked **${target.tag}** for: *${reason}*.` });
         }
+
+        // --- NEW: PURGE COMMAND HANDLER ---
+        if (commandName === 'purge') {
+            const amount = options.getInteger('amount');
+            
+            await interaction.deferReply({ ephemeral: true });
+            try {
+                const deleted = await interaction.channel.bulkDelete(amount, true);
+                await interaction.editReply({ content: `🧹 Cleared \`${deleted.size}\` messages. (Messages older than 14 days cannot be bulk deleted due to Discord limits.)` });
+            } catch (err) {
+                console.error(err);
+                await interaction.editReply({ content: '❌ An error occurred while trying to purge messages in this channel.' });
+            }
+        }
+
+        // --- NEW: GIVEAWAY COMMAND HANDLER ---
+        if (commandName === 'giveaway') {
+            const prize = options.getString('prize');
+            const duration = options.getInteger('duration');
+            const winnerCount = options.getInteger('winners');
+
+            await interaction.reply({ content: '🎉 Creating giveaway event panel...', ephemeral: true });
+
+            const endTime = Math.floor((Date.now() + duration * 60 * 1000) / 1000);
+
+            const giveawayEmbed = new EmbedBuilder()
+                .setTitle('🎁 BAHADE HUB GIVEAWAY 🎁')
+                .setDescription(`**Prize:** ${prize}\n\n**Winners:** ${winnerCount}\n**Ends:** <t:${endTime}:R> (<t:${endTime}:f>)\n**Hosted By:** ${interaction.user}`)
+                .setColor(0xFEE75C)
+                .setTimestamp()
+                .setFooter({ text: 'Entries: 0' });
+
+            const joinRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId('join_giveaway')
+                    .setLabel('Join')
+                    .setStyle(ButtonStyle.Primary)
+                    .setEmoji('🎉')
+            );
+
+            const giveawayMessage = await interaction.channel.send({ embeds: [giveawayEmbed], components: [joinRow] });
+            
+            // Set up registration object in local system state maps
+            activeGiveaways.set(giveawayMessage.id, {
+                prize,
+                winnerCount,
+                entrants: new Set(),
+                ended: false
+            });
+
+            // Automatically clean up timer resolution pipeline
+            setTimeout(async () => {
+                const giveawayData = activeGiveaways.get(giveawayMessage.id);
+                if (!giveawayData || giveawayData.ended) return;
+
+                giveawayData.ended = true;
+                const pool = Array.from(giveawayData.entrants);
+                const chosenWinners = [];
+
+                if (pool.length > 0) {
+                    const actualWinnerCount = Math.min(giveawayData.winnerCount, pool.length);
+                    while (chosenWinners.length < actualWinnerCount) {
+                        const randomIndex = Math.floor(Math.random() * pool.length);
+                        const winnerId = pool.splice(randomIndex, 1)[0];
+                        chosenWinners.push(`<@${winnerId}>`);
+                    }
+                }
+
+                const endEmbed = new EmbedBuilder()
+                    .setTitle('🎁 GIVEAWAY ENDED 🎁')
+                    .setDescription(`**Prize:** ${giveawayData.prize}\n**Hosted By:** ${interaction.user}\n\n**Winners:** ${chosenWinners.length > 0 ? chosenWinners.join(', ') : 'No one joined the giveaway.'}`)
+                    .setColor(0xED4245)
+                    .setTimestamp();
+
+                // Disable the interactive button upon expiration
+                const disabledRow = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder()
+                        .setCustomId('join_giveaway')
+                        .setLabel('Giveaway Ended')
+                        .setStyle(ButtonStyle.Secondary)
+                        .setDisabled(true)
+                        .setEmoji('🔒')
+                );
+
+                await giveawayMessage.edit({ embeds: [endEmbed], components: [disabledRow] });
+
+                if (chosenWinners.length > 0) {
+                    await giveawayMessage.reply(`🎉 Congratulations ${chosenWinners.join(', ')}! You won **${giveawayData.prize}**!`);
+                } else {
+                    await giveawayMessage.reply('❌ The giveaway ended, but no entries were logged.');
+                }
+
+                activeGiveaways.delete(giveawayMessage.id);
+            }, duration * 60 * 1000);
+        }
     }
 
     // 2. BUTTON INTERACTIONS
@@ -224,7 +339,30 @@ client.on('interactionCreate', async interaction => {
             return await interaction.showModal(modal);
         }
 
-        // NEW: Instantly close ticket button logic
+        // --- NEW: JOIN GIVEAWAY BUTTON POOL HANDLER ---
+        if (interaction.customId === 'join_giveaway') {
+            const giveawayData = activeGiveaways.get(interaction.message.id);
+            if (!giveawayData) return interaction.reply({ content: '❌ Error: Giveaway configuration could not be loaded from memory.', ephemeral: true });
+
+            if (giveawayData.entrants.has(interaction.user.id)) {
+                giveawayData.entrants.delete(interaction.user.id);
+                
+                const updatedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
+                    .setFooter({ text: `Entries: ${giveawayData.entrants.size}` });
+                await interaction.message.edit({ embeds: [updatedEmbed] });
+
+                return interaction.reply({ content: '🏃 You have left the giveaway entry pool.', ephemeral: true });
+            }
+
+            giveawayData.entrants.add(interaction.user.id);
+            
+            const updatedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
+                .setFooter({ text: `Entries: ${giveawayData.entrants.size}` });
+            await interaction.message.edit({ embeds: [updatedEmbed] });
+
+            return interaction.reply({ content: '✅ Entry logged! You have joined the active pool structure.', ephemeral: true });
+        }
+
         if (interaction.customId === 'close_ticket_instantly') {
             const isStaff = interaction.member.roles.cache.has(STAFF_ROLE_ID) || interaction.member.permissions.has(PermissionFlagsBits.Administrator);
             if (!isStaff) return interaction.reply({ content: '❌ Only staff can close tickets.', ephemeral: true });
@@ -235,7 +373,6 @@ client.on('interactionCreate', async interaction => {
             }, 5000);
         }
 
-        // NEW: Triggers modal popup for close reason
         if (interaction.customId === 'close_ticket_with_reason') {
             const isStaff = interaction.member.roles.cache.has(STAFF_ROLE_ID) || interaction.member.permissions.has(PermissionFlagsBits.Administrator);
             if (!isStaff) return interaction.reply({ content: '❌ Only staff can close tickets.', ephemeral: true });
@@ -258,7 +395,6 @@ client.on('interactionCreate', async interaction => {
 
     // 3. MODAL SUBMISSIONS
     if (interaction.isModalSubmit()) {
-        // Ticket Form Modal Handler
         if (interaction.customId === 'ticket_form_modal') {
             await interaction.deferReply({ ephemeral: true });
 
@@ -273,7 +409,7 @@ client.on('interactionCreate', async interaction => {
                 const ticketChannel = await guild.channels.create({
                     name: channelName,
                     type: ChannelType.GuildText,
-                    parent: TICKET_CATEGORY_ID, // 📁 Forces creation inside your exact category id
+                    parent: TICKET_CATEGORY_ID, 
                     permissionOverwrites: [
                         {
                             id: guild.roles.everyone.id,
@@ -301,7 +437,6 @@ client.on('interactionCreate', async interaction => {
                     .setColor(0x2F3136)
                     .setTimestamp();
 
-                // NEW: Adds the ActionRow holding the Close options directly into the Ticket channel layout
                 const managementRow = new ActionRowBuilder().addComponents(
                     new ButtonBuilder()
                         .setCustomId('close_ticket_instantly')
@@ -329,7 +464,6 @@ client.on('interactionCreate', async interaction => {
             }
         }
 
-        // NEW: Handles the close reason input submission pipeline
         if (interaction.customId === 'close_reason_modal') {
             const closeReason = interaction.fields.getTextInputValue('close_reason_input');
             await interaction.reply({ content: `🔒 Ticket closed by staff.\n**Reason:** ${closeReason}\n\n*Deleting channel in 5 seconds...*` });
@@ -341,10 +475,16 @@ client.on('interactionCreate', async interaction => {
     }
 });
 
-// --- AUTOMATIC ONE-DAY BAN & PURGE HANDLER ---
+// --- TEXT MESSAGE EVENT HANDLING ---
 client.on('messageCreate', async message => {
     if (message.author.bot || !message.guild) return;
 
+    // 1. NEW: AUTO REACT PIPELINE PIPELINE
+    if (message.channel.id === AUTO_REACT_CHANNEL_ID) {
+        await message.react('⭐').catch(err => console.error("Error applying auto reaction:", err));
+    }
+
+    // 2. HONEYPOT AUTOMATIC ONE-DAY BAN & PURGE HANDLER
     if (message.channel.id === SPECIFIC_CHANNEL_ID) {
         if (message.member.roles.cache.has(STAFF_ROLE_ID) || message.member.permissions.has(PermissionFlagsBits.Administrator)) {
             return; 
