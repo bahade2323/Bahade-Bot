@@ -23,7 +23,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-    res.send('🤖 Bahade Hub Bot is alive and operational 24/7!');
+    res.send('🤖 Miwa Hub Bot is alive and operational 24/7!');
 });
 
 app.listen(PORT, () => {
@@ -50,7 +50,7 @@ const client = new Client({
 const commands = [
     new SlashCommandBuilder()
         .setName('setuprules')
-        .setDescription('Spawns the BAHADE HUB rules embed with a Verify button.')
+        .setDescription('Spawns the MIWA HUB rules embed with a Verify button.')
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
     new SlashCommandBuilder()
@@ -142,7 +142,7 @@ client.on('interactionCreate', async interaction => {
 
         if (commandName === 'setuprules') {
             const embed = new EmbedBuilder()
-                .setTitle('👑 BAHADE HUB RULES 👑')
+                .setTitle('👑 MIWA HUB RULES 👑')
                 .setDescription('*Follow these rules or get banned. Simple as that.*')
                 .setColor(0x00FF00)
                 .addFields(
@@ -166,7 +166,7 @@ client.on('interactionCreate', async interaction => {
 
         if (commandName === 'setuptickets') {
             const embed = new EmbedBuilder()
-                .setTitle('🎟️ BAHADE HUB PREMIUM SUPPORT 🎟️')
+                .setTitle('🎟️ MIWA HUB PREMIUM SUPPORT 🎟️')
                 .setDescription('Need support regarding your custom Robux transaction, missing keys, or script activation?\n\nClick the button below to submit your support request form.')
                 .setColor(0x5865F2)
                 .setFooter({ text: 'A private support channel will be made for you.' });
@@ -241,7 +241,7 @@ client.on('interactionCreate', async interaction => {
                 const endTime = Math.floor((Date.now() + duration * 60 * 1000) / 1000);
 
                 const giveawayEmbed = new EmbedBuilder()
-                    .setTitle('🎁 BAHADE HUB GIVEAWAY 🎁')
+                    .setTitle('🎁 MIWA HUB GIVEAWAY 🎁')
                     .setDescription(`**Prize:** ${prize}\n\n**Winners:** ${winnerCount}\n**Ends:** <t:${endTime}:R> (<t:${endTime}:f>)\n**Hosted By:** ${interaction.user}`)
                     .setColor(0xFEE75C)
                     .setTimestamp()
