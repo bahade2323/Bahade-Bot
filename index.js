@@ -31,10 +31,14 @@ app.listen(PORT, () => {
 });
 
 const SPECIFIC_CHANNEL_ID = "1522803202075132025"; 
-const VERIFY_ROLE_ID = "1522516985974624317";     
-const STAFF_ROLE_ID = "1522516757607223396";      
+const VERIFY_ROLE_ID = "1522516985974624317";      
+const STAFF_ROLE_ID = "1522516757607223396";       
 const TICKET_CATEGORY_ID = "1523675506111811656";
 const AUTO_REACT_CHANNEL_ID = "1525590338104725564";
+
+// Auto-Forward Configuration IDs
+const FOLLOW_CHANNEL_ID = "1470799017045921977";
+const DESTINATION_CHANNEL_ID = "1525876599143268423";
 
 const client = new Client({
     intents: [
@@ -86,7 +90,6 @@ const commands = [
                 .setName('start')
                 .setDescription('Starts a giveaway inside the server.')
                 .addStringOption(option => option.setName('prize').setDescription('What is the giveaway prize?').setRequired(true))
-                // 525600 minutes = 365 Days (1 Year) Max Limit
                 .addIntegerOption(option => option.setName('duration').setDescription('Giveaway duration in minutes (Max: 525600)').setRequired(true).setMinValue(1).setMaxValue(525600))
                 .addIntegerOption(option => option.setName('winners').setDescription('Number of possible winners').setRequired(true).setMinValue(1)))
         .addSubcommand(subcommand =>
@@ -117,14 +120,11 @@ client.once('ready', async () => {
         console.error('Error registering application commands:', error);
     }
 
-    // Start the persistent polling interval check loop (runs every 60 seconds)
     setInterval(checkGiveaways, 60000);
 });
 
-// Cache map to store active giveaway structures
 const activeGiveaways = new Map();
 
-// Helper execution handler to process the conclusion structural payload of a giveaway
 async function endGiveaway(messageId, giveawayData) {
     if (giveawayData.ended) return;
     giveawayData.ended = true;
@@ -178,7 +178,6 @@ async function endGiveaway(messageId, giveawayData) {
     }
 }
 
-// Background poller running every minute checking epoch arrays
 async function checkGiveaways() {
     const nowElement = Math.floor(Date.now() / 1000);
     for (const [messageId, data] of activeGiveaways.entries()) {
@@ -314,7 +313,6 @@ client.on('interactionCreate', async interaction => {
                     components: [joinRow] 
                 });
                 
-                // Cache configuration safely using a timestamp integer mapping instead of setTimeout
                 activeGiveaways.set(giveawayMessage.id, {
                     prize,
                     winnerCount,
@@ -589,6 +587,39 @@ client.on('interactionCreate', async interaction => {
 
 client.on('messageCreate', async message => {
     if (message.author.bot || !message.guild) return;
+
+    // --- FEATURE: Auto-Forward Text Channel ---
+    if (message.channel.id === FOLLOW_CHANNEL_ID) {
+        try {
+            const destinationChannel = await message.guild.channels.fetch(DESTINATION_CHANNEL_ID).catch(() => null);
+            
+            if (destinationChannel && destinationChannel.isTextBased()) {
+                const payload = {};
+
+                // Handle text contents nicely
+                if (message.content) {
+                    payload.content = message.content;
+                }
+
+                // Append matching files or assets if they exist
+                if (message.attachments.size > 0) {
+                    payload.files = Array.from(message.attachments.values());
+                }
+
+                // Clone structure maps for native embeds safely
+                if (message.embeds.length > 0) {
+                    payload.embeds = message.embeds.map(e => EmbedBuilder.from(e));
+                }
+
+                // Avoid running deep engine faults if fields evaluate clean/empty
+                if (payload.content || payload.files || payload.embeds) {
+                    await destinationChannel.send(payload);
+                }
+            }
+        } catch (err) {
+            console.error("Auto-Forward system pipe error encountered:", err);
+        }
+    }
 
     if (message.channel.id === AUTO_REACT_CHANNEL_ID) {
         await message.react('⭐').catch(err => console.error("Error applying auto reaction:", err));
