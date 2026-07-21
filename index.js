@@ -103,6 +103,12 @@ const commands = [
                 .setName('cancel')
                 .setDescription('Cancel and delete an active giveaway setup')
                 .addStringOption(option => option.setName('message_id').setDescription('Active Giveaway Message ID').setRequired(true)))
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('forcewin')
+                .setDescription('Instantly end a giveaway and declare a winner.')
+                .addStringOption(option => option.setName('message_id').setDescription('Active Giveaway Message ID').setRequired(true))
+                .addUserOption(option => option.setName('target').setDescription('User to instantly win (Leave blank to pick randomly)').setRequired(false)))
 ];
 
 client.once('ready', async () => {
@@ -125,7 +131,7 @@ client.once('ready', async () => {
 
 const activeGiveaways = new Map();
 
-async function endGiveaway(messageId, giveawayData) {
+async function endGiveaway(messageId, giveawayData, forcedWinnerUser = null) {
     if (giveawayData.ended) return;
     giveawayData.ended = true;
 
@@ -139,15 +145,19 @@ async function endGiveaway(messageId, giveawayData) {
         const giveawayMessage = await targetChannel.messages.fetch(messageId).catch(() => null);
         if (!giveawayMessage) return;
 
-        const pool = Array.from(giveawayData.entrants);
         const chosenWinners = [];
 
-        if (pool.length > 0) {
-            const actualWinnerCount = Math.min(giveawayData.winnerCount, pool.length);
-            while (chosenWinners.length < actualWinnerCount) {
-                const randomIndex = Math.floor(Math.random() * pool.length);
-                const winnerId = pool.splice(randomIndex, 1)[0];
-                chosenWinners.push(`<@${winnerId}>`);
+        if (forcedWinnerUser) {
+            chosenWinners.push(`<@${forcedWinnerUser.id}>`);
+        } else {
+            const pool = Array.from(giveawayData.entrants);
+            if (pool.length > 0) {
+                const actualWinnerCount = Math.min(giveawayData.winnerCount, pool.length);
+                while (chosenWinners.length < actualWinnerCount) {
+                    const randomIndex = Math.floor(Math.random() * pool.length);
+                    const winnerId = pool.splice(randomIndex, 1)[0];
+                    chosenWinners.push(`<@${winnerId}>`);
+                }
             }
         }
 
@@ -399,6 +409,25 @@ client.on('interactionCreate', async interaction => {
                 activeGiveaways.delete(messageId);
                 return interaction.editReply(`🛑 Successfully canceled the giveaway setup! The instance has been removed from active registries.`);
             }
+
+            if (subcommand === 'forcewin') {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                const messageId = options.getString('message_id');
+                const targetUser = options.getUser('target');
+
+                const giveawayData = activeGiveaways.get(messageId);
+                if (!giveawayData) {
+                    return interaction.editReply(`❌ Unable to locate an active giveaway linked with Message ID: \`${messageId}\``);
+                }
+                if (giveawayData.ended) {
+                    return interaction.editReply('❌ This giveaway has already ended!');
+                }
+
+                await endGiveaway(messageId, giveawayData, targetUser);
+
+                const winnerMention = targetUser ? `${targetUser.tag}` : 'instant drawing pool';
+                return interaction.editReply(`⚡ Successfully forced the giveaway to end instantly! Winner: **${winnerMention}**.`);
+            }
         }
     }
 
@@ -586,32 +615,30 @@ client.on('interactionCreate', async interaction => {
 });
 
 client.on('messageCreate', async message => {
-    if (message.author.bot || !message.guild) return;
+    if (!message.guild) return;
 
     // --- FEATURE: Auto-Forward Text Channel ---
     if (message.channel.id === FOLLOW_CHANNEL_ID) {
+        if (message.author.id === client.user.id) return;
+
         try {
-            const destinationChannel = await message.guild.channels.fetch(DESTINATION_CHANNEL_ID).catch(() => null);
+            const destinationChannel = await client.channels.fetch(DESTINATION_CHANNEL_ID).catch(() => null);
             
             if (destinationChannel && destinationChannel.isTextBased()) {
                 const payload = {};
 
-                // Handle text contents nicely
                 if (message.content) {
                     payload.content = message.content;
                 }
 
-                // Append matching files or assets if they exist
                 if (message.attachments.size > 0) {
                     payload.files = Array.from(message.attachments.values());
                 }
 
-                // Clone structure maps for native embeds safely
                 if (message.embeds.length > 0) {
                     payload.embeds = message.embeds.map(e => EmbedBuilder.from(e));
                 }
 
-                // Avoid running deep engine faults if fields evaluate clean/empty
                 if (payload.content || payload.files || payload.embeds) {
                     await destinationChannel.send(payload);
                 }
@@ -620,6 +647,8 @@ client.on('messageCreate', async message => {
             console.error("Auto-Forward system pipe error encountered:", err);
         }
     }
+
+    if (message.author.bot) return;
 
     if (message.channel.id === AUTO_REACT_CHANNEL_ID) {
         await message.react('⭐').catch(err => console.error("Error applying auto reaction:", err));
