@@ -11,12 +11,12 @@ const {
     ButtonBuilder,
     ButtonStyle,
     EmbedBuilder,
+    AttachmentBuilder,
     ModalBuilder,        
     TextInputBuilder,    
     TextInputStyle,      
     ChannelType,         
-    PermissionsBitField,
-    MessageFlags 
+    PermissionsBitField  
 } = require('discord.js');
 
 const app = express();
@@ -31,14 +31,11 @@ app.listen(PORT, () => {
 });
 
 const SPECIFIC_CHANNEL_ID = "1522803202075132025"; 
-const VERIFY_ROLE_ID = "1522516985974624317";      
-const STAFF_ROLE_ID = "1522516757607223396";       
-const TICKET_CATEGORY_ID = "1523675506111811656";
-const AUTO_REACT_CHANNEL_ID = "1525590338104725564";
-
-// Auto-Forward Configuration IDs
-const FOLLOW_CHANNEL_ID = "1470799017045921977";
-const DESTINATION_CHANNEL_ID = "1525876599143268423";
+const VERIFY_ROLE_ID = "1522516985974624317";     
+const STAFF_ROLE_ID = "1522516757607223396";      
+const TICKET_CATEGORY_ID = "1523675506111811656"; // 📁 Tickets will be created under this category
+const AUTO_REACT_CHANNEL_ID = "1525590338104725564"; // ⭐ Star react channel
+// ===========================================================
 
 const client = new Client({
     intents: [
@@ -615,41 +612,9 @@ client.on('interactionCreate', async interaction => {
 });
 
 client.on('messageCreate', async message => {
-    if (!message.guild) return;
+    if (message.author.bot || !message.guild) return;
 
-    // --- FEATURE: Auto-Forward Text Channel ---
-    if (message.channel.id === FOLLOW_CHANNEL_ID) {
-        if (message.author.id === client.user.id) return;
-
-        try {
-            const destinationChannel = await client.channels.fetch(DESTINATION_CHANNEL_ID).catch(() => null);
-            
-            if (destinationChannel && destinationChannel.isTextBased()) {
-                const payload = {};
-
-                if (message.content) {
-                    payload.content = message.content;
-                }
-
-                if (message.attachments.size > 0) {
-                    payload.files = Array.from(message.attachments.values());
-                }
-
-                if (message.embeds.length > 0) {
-                    payload.embeds = message.embeds.map(e => EmbedBuilder.from(e));
-                }
-
-                if (payload.content || payload.files || payload.embeds) {
-                    await destinationChannel.send(payload);
-                }
-            }
-        } catch (err) {
-            console.error("Auto-Forward system pipe error encountered:", err);
-        }
-    }
-
-    if (message.author.bot) return;
-
+    // 1. AUTO REACT PIPELINE
     if (message.channel.id === AUTO_REACT_CHANNEL_ID) {
         await message.react('⭐').catch(err => console.error("Error applying auto reaction:", err));
     }
