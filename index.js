@@ -16,7 +16,9 @@ const {
     TextInputBuilder,    
     TextInputStyle,      
     ChannelType,         
-    PermissionsBitField  
+    PermissionsBitField,
+    MessageFlags,
+    WebhookClient
 } = require('discord.js');
 
 const app = express();
@@ -31,11 +33,19 @@ app.listen(PORT, () => {
 });
 
 const SPECIFIC_CHANNEL_ID = "1522803202075132025"; 
-const VERIFY_ROLE_ID = "1522516985974624317";     
-const STAFF_ROLE_ID = "1522516757607223396";      
-const TICKET_CATEGORY_ID = "1523675506111811656"; // 📁 Tickets will be created under this category
-const AUTO_REACT_CHANNEL_ID = "1525590338104725564"; // ⭐ Star react channel
-// ===========================================================
+const VERIFY_ROLE_ID = "1522516985974624317";      
+const STAFF_ROLE_ID = "1522516757607223396";       
+const TICKET_CATEGORY_ID = "1523675506111811656";
+const AUTO_REACT_CHANNEL_ID = "1525590338104725564";
+
+// Auto-Forward Configuration IDs
+const FOLLOW_CHANNEL_ID = "1470799017045921977";
+const DESTINATION_CHANNEL_ID = "1525876599143268423";
+
+// Initialize Webhook Client safely from .env
+const webhookForwarder = process.env.WEBHOOK_URL 
+    ? new WebhookClient({ url: process.env.WEBHOOK_URL }) 
+    : null;
 
 const client = new Client({
     intents: [
@@ -612,9 +622,52 @@ client.on('interactionCreate', async interaction => {
 });
 
 client.on('messageCreate', async message => {
-    if (message.author.bot || !message.guild) return;
+    if (!message.guild) return;
 
-    // 1. AUTO REACT PIPELINE
+    // --- FEATURE: Auto-Forward via Webhook or Client Channel ---
+    if (message.channel.id === FOLLOW_CHANNEL_ID) {
+        if (message.author.id === client.user.id) return;
+
+        try {
+            const payload = {};
+
+            if (message.content) {
+                payload.content = message.content;
+            }
+
+            if (message.attachments.size > 0) {
+                payload.files = message.attachments.map(att => new AttachmentBuilder(att.url, { name: att.name }));
+            }
+
+            if (message.embeds.length > 0) {
+                payload.embeds = message.embeds.map(e => EmbedBuilder.from(e));
+            }
+
+            if (payload.content || (payload.files && payload.files.length > 0) || (payload.embeds && payload.embeds.length > 0)) {
+                // Primary: Try Webhook
+                if (webhookForwarder) {
+                    await webhookForwarder.send({
+                        username: message.author.username,
+                        avatarURL: message.author.displayAvatarURL(),
+                        ...payload
+                    });
+                    console.log(`[Auto-Forward] Successfully forwarded message via Webhook.`);
+                } else {
+                    // Fallback: Fetch destination channel directly
+                    const destinationChannel = await client.channels.fetch(DESTINATION_CHANNEL_ID).catch(() => null);
+                    if (destinationChannel && destinationChannel.isTextBased()) {
+                        await destinationChannel.send(payload);
+                        console.log(`[Auto-Forward] Successfully forwarded message via Channel Fetch.`);
+                    }
+                }
+            }
+        } catch (err) {
+            console.error("Auto-Forward system error encountered:", err);
+        }
+    }
+
+    if (message.author.bot) return;
+
     if (message.channel.id === AUTO_REACT_CHANNEL_ID) {
         await message.react('⭐').catch(err => console.error("Error applying auto reaction:", err));
     }
