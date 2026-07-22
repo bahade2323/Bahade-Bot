@@ -1,5 +1,5 @@
 require('dotenv').config();
-const express = require('express'); // Web framework to keep Render active
+const express = require('express');
 const { 
     Client, 
     GatewayIntentBits, 
@@ -11,33 +11,41 @@ const {
     ButtonBuilder,
     ButtonStyle,
     EmbedBuilder,
+    AttachmentBuilder,
     ModalBuilder,        
     TextInputBuilder,    
     TextInputStyle,      
     ChannelType,         
-    PermissionsBitField  
+    PermissionsBitField,
+    MessageFlags,
+    WebhookClient
 } = require('discord.js');
 
-// ==================== KEEP-ALIVE WEB SERVER ====================
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-    res.send('🤖 Bahade Hub Bot is alive and operational 24/7!');
+    res.send('🤖 Miwa Hub Bot is alive and operational 24/7!');
 });
 
 app.listen(PORT, () => {
     console.log(`🌐 Keep-alive server is listening on port ${PORT}`);
 });
-// ===============================================================
 
-// ==================== BOT CONFIGURATION ====================
 const SPECIFIC_CHANNEL_ID = "1522803202075132025"; 
-const VERIFY_ROLE_ID = "1522516985974624317";     
-const STAFF_ROLE_ID = "1522516757607223396";      
-const TICKET_CATEGORY_ID = "1523675506111811656"; // 📁 Tickets will be created under this category
-const AUTO_REACT_CHANNEL_ID = "1525590338104725564"; // ⭐ Star react channel
-// ===========================================================
+const VERIFY_ROLE_ID = "1522516985974624317";      
+const STAFF_ROLE_ID = "1522516757607223396";       
+const TICKET_CATEGORY_ID = "1523675506111811656";
+const AUTO_REACT_CHANNEL_ID = "1525590338104725564";
+
+// Auto-Forward Configuration IDs
+const FOLLOW_CHANNEL_ID = "1470799017045921977";
+const DESTINATION_CHANNEL_ID = "1525876599143268423";
+
+// Initialize Webhook Client safely from .env
+const webhookForwarder = process.env.WEBHOOK_URL 
+    ? new WebhookClient({ url: process.env.WEBHOOK_URL }) 
+    : null;
 
 const client = new Client({
     intents: [
@@ -48,11 +56,11 @@ const client = new Client({
     ]
 });
 
-// Define Slash Commands Structure
+// Slash Commands Configuration
 const commands = [
     new SlashCommandBuilder()
         .setName('setuprules')
-        .setDescription('Spawns the BAHADE HUB rules embed with a Verify button.')
+        .setDescription('Spawns the MIWA HUB rules embed with a Verify button.')
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
     new SlashCommandBuilder()
@@ -80,35 +88,36 @@ const commands = [
         .addIntegerOption(option => option.setName('amount').setDescription('Number of messages to clear (1-100)').setRequired(true).setMinValue(1).setMaxValue(100))
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
 
-    // ==================== NEW/UPDATED COMPLETE GIVEAWAY COMMANDS STRUCTURE ====================
     new SlashCommandBuilder()
         .setName('giveaway')
         .setDescription('Giveaway automated management suite')
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageEvents)
-        // SUBCOMMAND: START
         .addSubcommand(subcommand =>
             subcommand
                 .setName('start')
                 .setDescription('Starts a giveaway inside the server.')
                 .addStringOption(option => option.setName('prize').setDescription('What is the giveaway prize?').setRequired(true))
-                .addIntegerOption(option => option.setName('duration').setDescription('Giveaway duration in minutes').setRequired(true).setMinValue(1))
+                .addIntegerOption(option => option.setName('duration').setDescription('Giveaway duration in minutes (Max: 525600)').setRequired(true).setMinValue(1).setMaxValue(525600))
                 .addIntegerOption(option => option.setName('winners').setDescription('Number of possible winners').setRequired(true).setMinValue(1)))
-        // SUBCOMMAND: REROLL (WITH WINNERS LIMIT)
         .addSubcommand(subcommand =>
             subcommand
                 .setName('reroll')
                 .setDescription('Reroll an ended giveaway with an optional winner limit count')
                 .addStringOption(option => option.setName('message_id').setDescription('Giveaway Message ID').setRequired(true))
                 .addIntegerOption(option => option.setName('winners').setDescription('Override number of new winners to draw').setRequired(false).setMinValue(1)))
-        // SUBCOMMAND: CANCEL
         .addSubcommand(subcommand =>
             subcommand
                 .setName('cancel')
                 .setDescription('Cancel and delete an active giveaway setup')
                 .addStringOption(option => option.setName('message_id').setDescription('Active Giveaway Message ID').setRequired(true)))
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('forcewin')
+                .setDescription('Instantly end a giveaway and declare a winner.')
+                .addStringOption(option => option.setName('message_id').setDescription('Active Giveaway Message ID').setRequired(true))
+                .addUserOption(option => option.setName('target').setDescription('User to instantly win (Leave blank to pick randomly)').setRequired(false)))
 ];
 
-// Register slash commands globally when client connects
 client.once('ready', async () => {
     console.log(`⚡ Logged in as ${client.user.tag}!`);
     
@@ -123,28 +132,91 @@ client.once('ready', async () => {
     } catch (error) {
         console.error('Error registering application commands:', error);
     }
+
+    setInterval(checkGiveaways, 60000);
 });
 
-// Cache map to store active giveaway entrants dynamically in memory
 const activeGiveaways = new Map();
 
-// --- CORE INTERACTION HANDLER ---
+async function endGiveaway(messageId, giveawayData, forcedWinnerUser = null) {
+    if (giveawayData.ended) return;
+    giveawayData.ended = true;
+
+    try {
+        const guild = await client.guilds.fetch(giveawayData.guildId).catch(() => null);
+        if (!guild) return;
+
+        const targetChannel = await guild.channels.fetch(giveawayData.channelId).catch(() => null);
+        if (!targetChannel) return;
+
+        const giveawayMessage = await targetChannel.messages.fetch(messageId).catch(() => null);
+        if (!giveawayMessage) return;
+
+        const chosenWinners = [];
+
+        if (forcedWinnerUser) {
+            chosenWinners.push(`<@${forcedWinnerUser.id}>`);
+        } else {
+            const pool = Array.from(giveawayData.entrants);
+            if (pool.length > 0) {
+                const actualWinnerCount = Math.min(giveawayData.winnerCount, pool.length);
+                while (chosenWinners.length < actualWinnerCount) {
+                    const randomIndex = Math.floor(Math.random() * pool.length);
+                    const winnerId = pool.splice(randomIndex, 1)[0];
+                    chosenWinners.push(`<@${winnerId}>`);
+                }
+            }
+        }
+
+        const endEmbed = new EmbedBuilder()
+            .setTitle('🎁 GIVEAWAY ENDED 🎁')
+            .setDescription(`**Prize:** ${giveawayData.prize}\n**Hosted By:** <@${giveawayData.hostId}>\n\n**Winners:** ${chosenWinners.length > 0 ? chosenWinners.join(', ') : 'No one joined the giveaway.'}`)
+            .setColor(0xED4245)
+            .setTimestamp();
+
+        const disabledRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId('join_giveaway')
+                .setLabel('Giveaway Ended')
+                .setStyle(ButtonStyle.Secondary)
+                .setDisabled(true)
+                .setEmoji('🔒')
+        );
+
+        await giveawayMessage.edit({ content: '🎉 **Giveaway Ended!**', embeds: [endEmbed], components: [disabledRow] }).catch(() => {});
+
+        if (chosenWinners.length > 0) {
+            await giveawayMessage.reply(`🎉 Congratulations ${chosenWinners.join(', ')}! You won the **${giveawayData.prize}**!`).catch(() => {});
+        } else {
+            await giveawayMessage.reply('❌ The giveaway ended, but no entries were logged.').catch(() => {});
+        }
+    } catch (err) {
+        console.error("Error processing giveaway termination handler:", err);
+    }
+}
+
+async function checkGiveaways() {
+    const nowElement = Math.floor(Date.now() / 1000);
+    for (const [messageId, data] of activeGiveaways.entries()) {
+        if (!data.ended && nowElement >= data.endTimestamp) {
+            await endGiveaway(messageId, data);
+        }
+    }
+}
+
 client.on('interactionCreate', async interaction => {
-    
-    // 1. CHAT SLASH COMMANDS
     if (interaction.isChatInputCommand()) {
         const { commandName, options, member } = interaction;
         const isStaff = member.roles.cache.has(STAFF_ROLE_ID) || member.permissions.has(PermissionFlagsBits.Administrator);
 
-        // Staff protection check for commands
         const staffCommands = ['ban', 'kick', 'setuprules', 'setuptickets', 'purge', 'giveaway'];
         if (staffCommands.includes(commandName) && !isStaff) {
-            return interaction.reply({ content: '❌ You do not have permission to use this staff command.', ephemeral: true });
+            return interaction.reply({ content: '❌ You do not have permission to use this staff command.', flags: [MessageFlags.Ephemeral] });
         }
 
         if (commandName === 'setuprules') {
             const embed = new EmbedBuilder()
-                .setTitle('👑 BAHADE HUB RULES 👑')
+                .setTitle('👑 MIWA HUB RULES 👑')
                 .setDescription('*Follow these rules or get banned. Simple as that.*')
                 .setColor(0x00FF00)
                 .addFields(
@@ -162,13 +234,13 @@ client.on('interactionCreate', async interaction => {
                     .setStyle(ButtonStyle.Success)
             );
 
-            await interaction.reply({ content: 'Rules panel deployed successfully!', ephemeral: true });
+            await interaction.reply({ content: 'Rules panel deployed successfully!', flags: [MessageFlags.Ephemeral] });
             await interaction.channel.send({ embeds: [embed], components: [row] });
         }
 
         if (commandName === 'setuptickets') {
             const embed = new EmbedBuilder()
-                .setTitle('🎟️ BAHADE HUB PREMIUM SUPPORT 🎟️')
+                .setTitle('🎟️ MIWA HUB PREMIUM SUPPORT 🎟️')
                 .setDescription('Need support regarding your custom Robux transaction, missing keys, or script activation?\n\nClick the button below to submit your support request form.')
                 .setColor(0x5865F2)
                 .setFooter({ text: 'A private support channel will be made for you.' });
@@ -181,7 +253,7 @@ client.on('interactionCreate', async interaction => {
                     .setEmoji('🎟️')
             );
 
-            await interaction.reply({ content: 'Ticket deployment panel active!', ephemeral: true });
+            await interaction.reply({ content: 'Ticket deployment panel active!', flags: [MessageFlags.Ephemeral] });
             await interaction.channel.send({ embeds: [embed], components: [row] });
         }
 
@@ -190,8 +262,8 @@ client.on('interactionCreate', async interaction => {
             const reason = options.getString('reason') || 'No reason provided';
             const targetMember = await interaction.guild.members.fetch(target.id).catch(() => null);
 
-            if (!targetMember) return interaction.reply({ content: 'User not found.', ephemeral: true });
-            if (!targetMember.bannable) return interaction.reply({ content: 'I cannot ban this user (Hierarchy error).', ephemeral: true });
+            if (!targetMember) return interaction.reply({ content: 'User not found.', flags: [MessageFlags.Ephemeral] });
+            if (!targetMember.bannable) return interaction.reply({ content: 'I cannot ban this user (Hierarchy error).', flags: [MessageFlags.Ephemeral] });
 
             await targetMember.ban({ 
                 deleteMessageSeconds: 604800, 
@@ -206,8 +278,8 @@ client.on('interactionCreate', async interaction => {
             const reason = options.getString('reason') || 'No reason provided';
             const targetMember = await interaction.guild.members.fetch(target.id).catch(() => null);
 
-            if (!targetMember) return interaction.reply({ content: 'User not found.', ephemeral: true });
-            if (!targetMember.kickable) return interaction.reply({ content: 'I cannot kick this user (Hierarchy error).', ephemeral: true });
+            if (!targetMember) return interaction.reply({ content: 'User not found.', flags: [MessageFlags.Ephemeral] });
+            if (!targetMember.kickable) return interaction.reply({ content: 'I cannot kick this user (Hierarchy error).', flags: [MessageFlags.Ephemeral] });
 
             await targetMember.kick(`Moderator: ${interaction.user.tag} | Reason: ${reason}`);
             await interaction.reply({ content: `✅ Successfully kicked **${target.tag}** for: *${reason}*.` });
@@ -215,8 +287,7 @@ client.on('interactionCreate', async interaction => {
 
         if (commandName === 'purge') {
             const amount = options.getInteger('amount');
-            
-            await interaction.deferReply({ ephemeral: true });
+            await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
             try {
                 const deleted = await interaction.channel.bulkDelete(amount, true);
                 await interaction.editReply({ content: `🧹 Cleared \`${deleted.size}\` messages. (Messages older than 14 days cannot be bulk deleted due to Discord limits.)` });
@@ -226,24 +297,20 @@ client.on('interactionCreate', async interaction => {
             }
         }
 
-        // ==================== REFACTORED WORKER: /GIVEAWAY [SUBCOMMANDS] ====================
         if (commandName === 'giveaway') {
             const subcommand = options.getSubcommand();
 
-            // ------------------------------------------
-            // METHOD: START
-            // ------------------------------------------
             if (subcommand === 'start') {
                 const prize = options.getString('prize');
                 const duration = options.getInteger('duration');
                 const winnerCount = options.getInteger('winners');
 
-                await interaction.reply({ content: '🎉 Creating giveaway event panel...', ephemeral: true });
+                await interaction.reply({ content: '🎉 Creating giveaway event panel...', flags: [MessageFlags.Ephemeral] });
 
                 const endTime = Math.floor((Date.now() + duration * 60 * 1000) / 1000);
 
                 const giveawayEmbed = new EmbedBuilder()
-                    .setTitle('🎁 BAHADE HUB GIVEAWAY 🎁')
+                    .setTitle('🎁 MIWA HUB GIVEAWAY 🎁')
                     .setDescription(`**Prize:** ${prize}\n\n**Winners:** ${winnerCount}\n**Ends:** <t:${endTime}:R> (<t:${endTime}:f>)\n**Hosted By:** ${interaction.user}`)
                     .setColor(0xFEE75C)
                     .setTimestamp()
@@ -257,69 +324,26 @@ client.on('interactionCreate', async interaction => {
                         .setEmoji('🎉')
                 );
 
-                const giveawayMessage = await interaction.channel.send({ embeds: [giveawayEmbed], components: [joinRow] });
+                const giveawayMessage = await interaction.channel.send({ 
+                    content: `🎉 **Giveaway Alert!** <@&${VERIFY_ROLE_ID}>`, 
+                    embeds: [giveawayEmbed], 
+                    components: [joinRow] 
+                });
                 
-                // Clear and schedule core timing resolution
-                const giveawayTimer = setTimeout(async () => {
-                    const giveawayData = activeGiveaways.get(giveawayMessage.id);
-                    if (!giveawayData || giveawayData.ended) return;
-
-                    giveawayData.ended = true;
-                    const pool = Array.from(giveawayData.entrants);
-                    const chosenWinners = [];
-
-                    if (pool.length > 0) {
-                        const actualWinnerCount = Math.min(giveawayData.winnerCount, pool.length);
-                        while (chosenWinners.length < actualWinnerCount) {
-                            const randomIndex = Math.floor(Math.random() * pool.length);
-                            const winnerId = pool.splice(randomIndex, 1)[0];
-                            chosenWinners.push(`<@${winnerId}>`);
-                        }
-                    }
-
-                    const endEmbed = new EmbedBuilder()
-                        .setTitle('🎁 GIVEAWAY ENDED 🎁')
-                        .setDescription(`**Prize:** ${giveawayData.prize}\n**Hosted By:** ${interaction.user}\n\n**Winners:** ${chosenWinners.length > 0 ? chosenWinners.join(', ') : 'No one joined the giveaway.'}`)
-                        .setColor(0xED4245)
-                        .setTimestamp();
-
-                    const disabledRow = new ActionRowBuilder().addComponents(
-                        new ButtonBuilder()
-                            .setCustomId('join_giveaway')
-                            .setLabel('Giveaway Ended')
-                            .setStyle(ButtonStyle.Secondary)
-                            .setDisabled(true)
-                            .setEmoji('🔒')
-                    );
-
-                    await giveawayMessage.edit({ embeds: [endEmbed], components: [disabledRow] }).catch(() => {});
-
-                    if (chosenWinners.length > 0) {
-                        await giveawayMessage.reply(`🎉 Congratulations ${chosenWinners.join(', ')}! You won **${giveawayData.prize}**!`).catch(() => {});
-                    } else {
-                        await giveawayMessage.reply('❌ The giveaway ended, but no entries were logged.').catch(() => {});
-                    }
-
-                    // Leave database profile logs untouched to allow future /reroll lookups
-                }, duration * 60 * 1000);
-
-                // Set up baseline data tree
                 activeGiveaways.set(giveawayMessage.id, {
                     prize,
                     winnerCount,
                     entrants: new Set(),
                     ended: false,
-                    timer: giveawayTimer,
+                    endTimestamp: endTime,
                     hostId: interaction.user.id,
-                    channelId: interaction.channel.id
+                    channelId: interaction.channel.id,
+                    guildId: interaction.guild.id
                 });
             }
 
-            // ------------------------------------------
-            // METHOD: REROLL
-            // ------------------------------------------
             if (subcommand === 'reroll') {
-                await interaction.deferReply({ ephemeral: true });
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
                 const messageId = options.getString('message_id');
                 const customWinnersCount = options.getInteger('winners');
 
@@ -356,11 +380,8 @@ client.on('interactionCreate', async interaction => {
                 }
             }
 
-            // ------------------------------------------
-            // METHOD: CANCEL
-            // ------------------------------------------
             if (subcommand === 'cancel') {
-                await interaction.deferReply({ ephemeral: true });
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
                 const messageId = options.getString('message_id');
 
                 const giveawayData = activeGiveaways.get(messageId);
@@ -370,9 +391,6 @@ client.on('interactionCreate', async interaction => {
                 if (giveawayData.ended) {
                     return interaction.editReply('❌ This giveaway has already ended and cannot be canceled.');
                 }
-
-                // Unschedule global node timeouts loop instantly to prevent delayed payouts execution leaks
-                clearTimeout(giveawayData.timer);
 
                 const targetChannel = await interaction.guild.channels.fetch(giveawayData.channelId).catch(() => null);
                 if (targetChannel) {
@@ -391,28 +409,46 @@ client.on('interactionCreate', async interaction => {
                                 .setStyle(ButtonStyle.Danger)
                                 .setDisabled(true)
                         );
-                        await targetMsg.edit({ embeds: [cancelEmbed], components: [disabledRow] }).catch(() => {});
+                        await targetMsg.edit({ content: '🛑 **Giveaway Canceled**', embeds: [cancelEmbed], components: [disabledRow] }).catch(() => {});
                     }
                 }
 
                 activeGiveaways.delete(messageId);
                 return interaction.editReply(`🛑 Successfully canceled the giveaway setup! The instance has been removed from active registries.`);
             }
+
+            if (subcommand === 'forcewin') {
+                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                const messageId = options.getString('message_id');
+                const targetUser = options.getUser('target');
+
+                const giveawayData = activeGiveaways.get(messageId);
+                if (!giveawayData) {
+                    return interaction.editReply(`❌ Unable to locate an active giveaway linked with Message ID: \`${messageId}\``);
+                }
+                if (giveawayData.ended) {
+                    return interaction.editReply('❌ This giveaway has already ended!');
+                }
+
+                await endGiveaway(messageId, giveawayData, targetUser);
+
+                const winnerMention = targetUser ? `${targetUser.tag}` : 'instant drawing pool';
+                return interaction.editReply(`⚡ Successfully forced the giveaway to end instantly! Winner: **${winnerMention}**.`);
+            }
         }
     }
 
-    // 2. BUTTON INTERACTIONS
     if (interaction.isButton()) {
         if (interaction.customId === 'verify_button') {
             const role = interaction.guild.roles.cache.get(VERIFY_ROLE_ID);
-            if (!role) return interaction.reply({ content: 'Verification role not found. Contact staff.', ephemeral: true });
+            if (!role) return interaction.reply({ content: 'Verification role not found. Contact staff.', flags: [MessageFlags.Ephemeral] });
 
             if (interaction.member.roles.cache.has(VERIFY_ROLE_ID)) {
-                return interaction.reply({ content: 'You are already verified!', ephemeral: true });
+                return interaction.reply({ content: 'You are already verified!', flags: [MessageFlags.Ephemeral] });
             }
 
             await interaction.member.roles.add(role);
-            await interaction.reply({ content: '✅ You have been successfully verified and granted access!', ephemeral: true });
+            await interaction.reply({ content: '✅ You have been successfully verified and granted access!', flags: [MessageFlags.Ephemeral] });
         }
 
         if (interaction.customId === 'open_ticket_btn') {
@@ -452,8 +488,8 @@ client.on('interactionCreate', async interaction => {
 
         if (interaction.customId === 'join_giveaway') {
             const giveawayData = activeGiveaways.get(interaction.message.id);
-            if (!giveawayData) return interaction.reply({ content: '❌ Error: Giveaway configuration could not be loaded from memory.', ephemeral: true });
-            if (giveawayData.ended) return interaction.reply({ content: '❌ This giveaway event has already structural closed processing pipelines.', ephemeral: true });
+            if (!giveawayData) return interaction.reply({ content: '❌ Error: Giveaway configuration could not be loaded from memory.', flags: [MessageFlags.Ephemeral] });
+            if (giveawayData.ended) return interaction.reply({ content: '❌ This giveaway event has already closed processing pipelines.', flags: [MessageFlags.Ephemeral] });
 
             if (giveawayData.entrants.has(interaction.user.id)) {
                 giveawayData.entrants.delete(interaction.user.id);
@@ -462,7 +498,7 @@ client.on('interactionCreate', async interaction => {
                     .setFooter({ text: `Entries: ${giveawayData.entrants.size}` });
                 await interaction.message.edit({ embeds: [updatedEmbed] }).catch(() => {});
 
-                return interaction.reply({ content: '🏃 You have left the giveaway entry pool.', ephemeral: true });
+                return interaction.reply({ content: '🏃 You have left the giveaway entry pool.', flags: [MessageFlags.Ephemeral] });
             }
 
             giveawayData.entrants.add(interaction.user.id);
@@ -471,12 +507,12 @@ client.on('interactionCreate', async interaction => {
                 .setFooter({ text: `Entries: ${giveawayData.entrants.size}` });
             await interaction.message.edit({ embeds: [updatedEmbed] }).catch(() => {});
 
-            return interaction.reply({ content: '✅ Entry logged! You have joined the active pool structure.', ephemeral: true });
+            return interaction.reply({ content: '✅ Entry logged! You have joined the active pool structure.', flags: [MessageFlags.Ephemeral] });
         }
 
         if (interaction.customId === 'close_ticket_instantly') {
             const isStaff = interaction.member.roles.cache.has(STAFF_ROLE_ID) || interaction.member.permissions.has(PermissionFlagsBits.Administrator);
-            if (!isStaff) return interaction.reply({ content: '❌ Only staff can close tickets.', ephemeral: true });
+            if (!isStaff) return interaction.reply({ content: '❌ Only staff can close tickets.', flags: [MessageFlags.Ephemeral] });
 
             await interaction.reply({ content: '🔒 Closing ticket environment in 5 seconds...' });
             setTimeout(async () => {
@@ -486,7 +522,7 @@ client.on('interactionCreate', async interaction => {
 
         if (interaction.customId === 'close_ticket_with_reason') {
             const isStaff = interaction.member.roles.cache.has(STAFF_ROLE_ID) || interaction.member.permissions.has(PermissionFlagsBits.Administrator);
-            if (!isStaff) return interaction.reply({ content: '❌ Only staff can close tickets.', ephemeral: true });
+            if (!isStaff) return interaction.reply({ content: '❌ Only staff can close tickets.', flags: [MessageFlags.Ephemeral] });
 
             const modal = new ModalBuilder()
                 .setCustomId('close_reason_modal')
@@ -504,10 +540,9 @@ client.on('interactionCreate', async interaction => {
         }
     }
 
-    // 3. MODAL SUBMISSIONS
     if (interaction.isModalSubmit()) {
         if (interaction.customId === 'ticket_form_modal') {
-            await interaction.deferReply({ ephemeral: true });
+            await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
             const robloxUser = interaction.fields.getTextInputValue('form_roblox_user');
             const keyType = interaction.fields.getTextInputValue('form_key_type');
@@ -586,16 +621,57 @@ client.on('interactionCreate', async interaction => {
     }
 });
 
-// --- TEXT MESSAGE EVENT HANDLING ---
 client.on('messageCreate', async message => {
-    if (message.author.bot || !message.guild) return;
+    if (!message.guild) return;
 
-    // 1. AUTO REACT PIPELINE
+    // --- FEATURE: Auto-Forward via Webhook or Client Channel ---
+    if (message.channel.id === FOLLOW_CHANNEL_ID) {
+        if (message.author.id === client.user.id) return;
+
+        try {
+            const payload = {};
+
+            if (message.content) {
+                payload.content = message.content;
+            }
+
+            if (message.attachments.size > 0) {
+                payload.files = message.attachments.map(att => new AttachmentBuilder(att.url, { name: att.name }));
+            }
+
+            if (message.embeds.length > 0) {
+                payload.embeds = message.embeds.map(e => EmbedBuilder.from(e));
+            }
+
+            if (payload.content || (payload.files && payload.files.length > 0) || (payload.embeds && payload.embeds.length > 0)) {
+                // Primary: Try Webhook
+                if (webhookForwarder) {
+                    await webhookForwarder.send({
+                        username: message.author.username,
+                        avatarURL: message.author.displayAvatarURL(),
+                        ...payload
+                    });
+                    console.log(`[Auto-Forward] Successfully forwarded message via Webhook.`);
+                } else {
+                    // Fallback: Fetch destination channel directly
+                    const destinationChannel = await client.channels.fetch(DESTINATION_CHANNEL_ID).catch(() => null);
+                    if (destinationChannel && destinationChannel.isTextBased()) {
+                        await destinationChannel.send(payload);
+                        console.log(`[Auto-Forward] Successfully forwarded message via Channel Fetch.`);
+                    }
+                }
+            }
+        } catch (err) {
+            console.error("Auto-Forward system error encountered:", err);
+        }
+    }
+
+    if (message.author.bot) return;
+
     if (message.channel.id === AUTO_REACT_CHANNEL_ID) {
         await message.react('⭐').catch(err => console.error("Error applying auto reaction:", err));
     }
 
-    // 2. HONEYPOT AUTOMATIC ONE-DAY BAN & PURGE HANDLER
     if (message.channel.id === SPECIFIC_CHANNEL_ID) {
         if (message.member.roles.cache.has(STAFF_ROLE_ID) || message.member.permissions.has(PermissionFlagsBits.Administrator)) {
             return; 
