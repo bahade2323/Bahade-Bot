@@ -1,5 +1,7 @@
 require('dotenv').config();
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const { 
     Client, 
     GatewayIntentBits, 
@@ -42,7 +44,7 @@ const AUTO_REACT_CHANNEL_ID = "1525590338104725564";
 const FOLLOW_CHANNEL_ID = "1470799017045921977";
 const DESTINATION_CHANNEL_ID = "1525876599143268423";
 
-// Initialize Webhook Client safely from .env
+// Webhook Client safely from .env
 const webhookForwarder = process.env.WEBHOOK_URL 
     ? new WebhookClient({ url: process.env.WEBHOOK_URL }) 
     : null;
@@ -118,13 +120,55 @@ const commands = [
                 .addUserOption(option => option.setName('target').setDescription('User to instantly win (Leave blank to pick randomly)').setRequired(false)))
 ];
 
+// --- GIVEAWAY PERSISTENCE LOGIC ---
+const GIVEAWAYS_FILE = path.join(__dirname, 'giveaways.json');
+const activeGiveaways = new Map();
+const SEVEN_DAYS_SECONDS = 7 * 24 * 60 * 60;
+
+function saveGiveaways() {
+    const dataToSave = {};
+    for (const [messageId, data] of activeGiveaways.entries()) {
+        dataToSave[messageId] = {
+            ...data,
+            entrants: Array.from(data.entrants) // Convert Set to Array for JSON saving
+        };
+    }
+    fs.writeFileSync(GIVEAWAYS_FILE, JSON.stringify(dataToSave, null, 4));
+}
+
+function loadGiveaways() {
+    if (fs.existsSync(GIVEAWAYS_FILE)) {
+        try {
+            const fileData = fs.readFileSync(GIVEAWAYS_FILE, 'utf-8');
+            const parsed = JSON.parse(fileData);
+            const nowElement = Math.floor(Date.now() / 1000);
+            
+            for (const [messageId, data] of Object.entries(parsed)) {
+                // Garbage Collection: Do not load giveaways that ended more than 7 days ago
+                if (data.ended && (nowElement - data.endTimestamp > SEVEN_DAYS_SECONDS)) {
+                    continue; 
+                }
+                
+                data.entrants = new Set(data.entrants); // Convert Array back to Set
+                activeGiveaways.set(messageId, data);
+            }
+            console.log(`📂 Loaded ${activeGiveaways.size} active/recent giveaways from storage.`);
+        } catch (err) {
+            console.error("Error loading giveaways JSON file:", err);
+        }
+    }
+}
+// ------------------------------------
+
 client.once('ready', async () => {
     console.log(`⚡ Logged in as ${client.user.tag}!`);
     
+    // Load giveaways before doing anything else
+    loadGiveaways(); 
+
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
     try {
         console.log('Started refreshing application (/) commands.');
-        // FIX: Must map builders to JSON
         await rest.put(
             Routes.applicationCommands(client.user.id),
             { body: commands.map(command => command.toJSON()) },
@@ -136,8 +180,6 @@ client.once('ready', async () => {
 
     setInterval(checkGiveaways, 60000);
 });
-
-const activeGiveaways = new Map();
 
 async function endGiveaway(messageId, giveawayData, forcedWinnerUser = null) {
     if (giveawayData.ended) return;
@@ -194,25 +236,32 @@ async function endGiveaway(messageId, giveawayData, forcedWinnerUser = null) {
     } catch (err) {
         console.error("Error processing giveaway termination handler:", err);
     } finally {
-        // FIX: Prevent memory leak by removing ended giveaway from the Map
-        activeGiveaways.delete(messageId);
+        // Save the updated "ended" status to the file
+        saveGiveaways();
     }
 }
 
 async function checkGiveaways() {
     const nowElement = Math.floor(Date.now() / 1000);
+    let memoryChanged = false;
+
     for (const [messageId, data] of activeGiveaways.entries()) {
         if (!data.ended && nowElement >= data.endTimestamp) {
             await endGiveaway(messageId, data);
+        } else if (data.ended && (nowElement - data.endTimestamp > SEVEN_DAYS_SECONDS)) {
+            // Garbage Collection: Delete memory & file trace of giveaways over 7 days old
+            activeGiveaways.delete(messageId);
+            memoryChanged = true;
         }
     }
+
+    if (memoryChanged) saveGiveaways();
 }
 
 client.on('interactionCreate', async interaction => {
     if (interaction.isChatInputCommand()) {
         const { commandName, options, member } = interaction;
         
-        // Prevent crashes if executed in DMs where member is null
         if (!member) return interaction.reply({ content: 'This command can only be used in a server.', flags: [MessageFlags.Ephemeral] });
         
         const isStaff = member.roles?.cache.has(STAFF_ROLE_ID) || member.permissions.has(PermissionFlagsBits.Administrator);
@@ -348,6 +397,9 @@ client.on('interactionCreate', async interaction => {
                     channelId: interaction.channel.id,
                     guildId: interaction.guild.id
                 });
+                
+                // Instantly save to file 
+                saveGiveaways();
             }
 
             if (subcommand === 'reroll') {
@@ -355,15 +407,10 @@ client.on('interactionCreate', async interaction => {
                 const messageId = options.getString('message_id');
                 const customWinnersCount = options.getInteger('winners');
 
-                // Reroll doesn't require it to be strictly inside activeGiveaways if it's already cleared,
-                // but if we deleted it, it won't work. Thus, for rerolls, you either need a persistent DB 
-                // OR you keep data cached temporarily. For this script, we'll assume it's still in Map if not restarted.
                 const giveawayData = activeGiveaways.get(messageId); 
                 
-                // If it was already deleted by our cleanup, reroll won't work from memory. 
-                // In an advanced setup, you'd pull from a Database here.
                 if (!giveawayData) {
-                    return interaction.editReply(`❌ Unable to find a matching giveaway context record in memory for Message ID: \`${messageId}\``);
+                    return interaction.editReply(`❌ Unable to find a matching giveaway in memory for Message ID: \`${messageId}\`. (Must have ended less than 7 days ago).`);
                 }
                 if (!giveawayData.ended) {
                     return interaction.editReply('❌ This giveaway has not ended yet! Use `/giveaway cancel` if you want to abort it.');
@@ -428,6 +475,8 @@ client.on('interactionCreate', async interaction => {
                 }
 
                 activeGiveaways.delete(messageId);
+                saveGiveaways(); // Flush memory removal to file
+                
                 return interaction.editReply(`🛑 Successfully canceled the giveaway setup! The instance has been removed from active registries.`);
             }
 
@@ -507,6 +556,7 @@ client.on('interactionCreate', async interaction => {
 
             if (giveawayData.entrants.has(interaction.user.id)) {
                 giveawayData.entrants.delete(interaction.user.id);
+                saveGiveaways(); // Save new entrant count
                 
                 const updatedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
                     .setFooter({ text: `Entries: ${giveawayData.entrants.size}` });
@@ -516,6 +566,7 @@ client.on('interactionCreate', async interaction => {
             }
 
             giveawayData.entrants.add(interaction.user.id);
+            saveGiveaways(); // Save new entrant count
             
             const updatedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
                 .setFooter({ text: `Entries: ${giveawayData.entrants.size}` });
@@ -564,7 +615,6 @@ client.on('interactionCreate', async interaction => {
 
             const guild = interaction.guild;
             
-            // FIX: Sanitize username for channel name to prevent API errors
             const safeUsername = interaction.user.username.toLowerCase().replace(/[^a-z0-9-]/g, '');
             const channelName = `ticket-${safeUsername}`;
 
@@ -640,7 +690,6 @@ client.on('interactionCreate', async interaction => {
 client.on('messageCreate', async message => {
     if (!message.guild || message.author.bot) return;
 
-    // --- FEATURE: Auto-Forward via Webhook or Client Channel ---
     if (message.channel.id === FOLLOW_CHANNEL_ID) {
         if (message.author.id === client.user.id) return;
 
@@ -693,8 +742,6 @@ client.on('messageCreate', async message => {
         }
 
         try {
-            // FIX: Using ban with deleteMessageSeconds automatically deletes the messages.
-            // Executing an additional manual purge right after throws errors and wastes API calls.
             await message.member.ban({ 
                 deleteMessageSeconds: 604800, 
                 reason: 'Auto-Ban: Chatting in honeypot restricted channel.' 
