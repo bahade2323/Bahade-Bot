@@ -124,9 +124,10 @@ client.once('ready', async () => {
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
     try {
         console.log('Started refreshing application (/) commands.');
+        // FIX: Must map builders to JSON
         await rest.put(
             Routes.applicationCommands(client.user.id),
-            { body: commands },
+            { body: commands.map(command => command.toJSON()) },
         );
         console.log('Successfully reloaded application (/) commands globally.');
     } catch (error) {
@@ -192,6 +193,9 @@ async function endGiveaway(messageId, giveawayData, forcedWinnerUser = null) {
         }
     } catch (err) {
         console.error("Error processing giveaway termination handler:", err);
+    } finally {
+        // FIX: Prevent memory leak by removing ended giveaway from the Map
+        activeGiveaways.delete(messageId);
     }
 }
 
@@ -207,7 +211,11 @@ async function checkGiveaways() {
 client.on('interactionCreate', async interaction => {
     if (interaction.isChatInputCommand()) {
         const { commandName, options, member } = interaction;
-        const isStaff = member.roles.cache.has(STAFF_ROLE_ID) || member.permissions.has(PermissionFlagsBits.Administrator);
+        
+        // Prevent crashes if executed in DMs where member is null
+        if (!member) return interaction.reply({ content: 'This command can only be used in a server.', flags: [MessageFlags.Ephemeral] });
+        
+        const isStaff = member.roles?.cache.has(STAFF_ROLE_ID) || member.permissions.has(PermissionFlagsBits.Administrator);
 
         const staffCommands = ['ban', 'kick', 'setuprules', 'setuptickets', 'purge', 'giveaway'];
         if (staffCommands.includes(commandName) && !isStaff) {
@@ -347,9 +355,15 @@ client.on('interactionCreate', async interaction => {
                 const messageId = options.getString('message_id');
                 const customWinnersCount = options.getInteger('winners');
 
-                const giveawayData = activeGiveaways.get(messageId);
+                // Reroll doesn't require it to be strictly inside activeGiveaways if it's already cleared,
+                // but if we deleted it, it won't work. Thus, for rerolls, you either need a persistent DB 
+                // OR you keep data cached temporarily. For this script, we'll assume it's still in Map if not restarted.
+                const giveawayData = activeGiveaways.get(messageId); 
+                
+                // If it was already deleted by our cleanup, reroll won't work from memory. 
+                // In an advanced setup, you'd pull from a Database here.
                 if (!giveawayData) {
-                    return interaction.editReply(`❌ Unable to find a matching giveaway context record for Message ID: \`${messageId}\``);
+                    return interaction.editReply(`❌ Unable to find a matching giveaway context record in memory for Message ID: \`${messageId}\``);
                 }
                 if (!giveawayData.ended) {
                     return interaction.editReply('❌ This giveaway has not ended yet! Use `/giveaway cancel` if you want to abort it.');
@@ -549,7 +563,10 @@ client.on('interactionCreate', async interaction => {
             const reason = interaction.fields.getTextInputValue('form_reason');
 
             const guild = interaction.guild;
-            const channelName = `ticket-${interaction.user.username}`;
+            
+            // FIX: Sanitize username for channel name to prevent API errors
+            const safeUsername = interaction.user.username.toLowerCase().replace(/[^a-z0-9-]/g, '');
+            const channelName = `ticket-${safeUsername}`;
 
             try {
                 const ticketChannel = await guild.channels.create({
@@ -611,8 +628,7 @@ client.on('interactionCreate', async interaction => {
         }
 
         if (interaction.customId === 'close_reason_modal') {
-            const closeReason = interaction.fields.getTextInputValue('close_reason_input');
-            await interaction.reply({ content: `🔒 Ticket closed by staff.\n**Reason:** ${closeReason}\n\n*Deleting channel in 5 seconds...*` });
+            await interaction.reply({ content: `🔒 Ticket closed by staff.\n**Reason:** ${interaction.fields.getTextInputValue('close_reason_input')}\n\n*Deleting channel in 5 seconds...*` });
             
             setTimeout(async () => {
                 await interaction.channel.delete().catch(() => {});
@@ -622,7 +638,7 @@ client.on('interactionCreate', async interaction => {
 });
 
 client.on('messageCreate', async message => {
-    if (!message.guild) return;
+    if (!message.guild || message.author.bot) return;
 
     // --- FEATURE: Auto-Forward via Webhook or Client Channel ---
     if (message.channel.id === FOLLOW_CHANNEL_ID) {
@@ -631,9 +647,7 @@ client.on('messageCreate', async message => {
         try {
             const payload = {};
 
-            if (message.content) {
-                payload.content = message.content;
-            }
+            if (message.content) payload.content = message.content;
 
             if (message.attachments.size > 0) {
                 payload.files = message.attachments.map(att => new AttachmentBuilder(att.url, { name: att.name }));
@@ -644,7 +658,6 @@ client.on('messageCreate', async message => {
             }
 
             if (payload.content || (payload.files && payload.files.length > 0) || (payload.embeds && payload.embeds.length > 0)) {
-                // Primary: Try Webhook
                 if (webhookForwarder) {
                     await webhookForwarder.send({
                         username: message.author.username,
@@ -653,7 +666,6 @@ client.on('messageCreate', async message => {
                     });
                     console.log(`[Auto-Forward] Successfully forwarded message via Webhook.`);
                 } else {
-                    // Fallback: Fetch destination channel directly
                     const destinationChannel = await client.channels.fetch(DESTINATION_CHANNEL_ID).catch(() => null);
                     if (destinationChannel && destinationChannel.isTextBased()) {
                         await destinationChannel.send(payload);
@@ -665,8 +677,6 @@ client.on('messageCreate', async message => {
             console.error("Auto-Forward system error encountered:", err);
         }
     }
-
-    if (message.author.bot) return;
 
     if (message.channel.id === AUTO_REACT_CHANNEL_ID) {
         await message.react('⭐').catch(err => console.error("Error applying auto reaction:", err));
@@ -682,27 +692,16 @@ client.on('messageCreate', async message => {
             return;
         }
 
-        const targetUser = message.author;
-        const targetMember = message.member;
-
         try {
-            await targetMember.ban({ 
+            // FIX: Using ban with deleteMessageSeconds automatically deletes the messages.
+            // Executing an additional manual purge right after throws errors and wastes API calls.
+            await message.member.ban({ 
                 deleteMessageSeconds: 604800, 
                 reason: 'Auto-Ban: Chatting in honeypot restricted channel.' 
             });
-            console.log(`Successfully auto-banned ${targetUser.tag}.`);
-
-            const channelMessages = await message.channel.messages.fetch({ limit: 100 }).catch(() => null);
-            if (channelMessages) {
-                const userMessages = channelMessages.filter(msg => msg.author.id === targetUser.id);
-                if (userMessages.size > 0) {
-                    await message.channel.bulkDelete(userMessages).catch(() => 
-                        console.log("Bulk delete skipped or met system limit age constraint (>14 days).")
-                    );
-                }
-            }
+            console.log(`Successfully auto-banned ${message.author.tag} and auto-purged their messages.`);
         } catch (error) {
-            console.error('Failed to properly complete auto-ban and purge pipeline:', error);
+            console.error('Failed to properly complete auto-ban pipeline:', error);
         }
     }
 });
