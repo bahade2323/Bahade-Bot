@@ -36,7 +36,7 @@ app.listen(PORT, () => {
 
 const SPECIFIC_CHANNEL_ID = "1522803202075132025"; 
 const VERIFY_ROLE_ID = "1522516985974624317";      
-const STAFF_ROLE_ID = "1522516757607223396";       
+const STAFF_ROLE_ID = "1522516757607223396";        
 const TICKET_CATEGORY_ID = "1523675506111811656";
 const AUTO_REACT_CHANNEL_ID = "1525590338104725564";
 
@@ -57,6 +57,36 @@ const client = new Client({
         GatewayIntentBits.GuildMembers
     ]
 });
+
+// --- HELPER FUNCTION: DURATION PARSER ---
+function parseDurationToMinutes(input) {
+    if (!input || typeof input !== 'string') return null;
+
+    const regex = /(\d+)\s*(years?|y|months?|mon|days?|d|hours?|h|minutes?|mins?|m)/gi;
+    let totalMinutes = 0;
+    let matchFound = false;
+
+    let match;
+    while ((match = regex.exec(input.toLowerCase())) !== null) {
+        matchFound = true;
+        const value = parseInt(match[1], 10);
+        const unit = match[2];
+
+        if (['y', 'year', 'years'].includes(unit)) {
+            totalMinutes += value * 365 * 24 * 60; // 1 Year
+        } else if (['mon', 'month', 'months'].includes(unit)) {
+            totalMinutes += value * 30 * 24 * 60;  // 1 Month
+        } else if (['d', 'day', 'days'].includes(unit)) {
+            totalMinutes += value * 24 * 60;       // 1 Day
+        } else if (['h', 'hour', 'hours'].includes(unit)) {
+            totalMinutes += value * 60;            // 1 Hour
+        } else if (['min', 'mins', 'minute', 'minutes', 'm'].includes(unit)) {
+            totalMinutes += value;                 // Minute
+        }
+    }
+
+    return matchFound && totalMinutes > 0 ? totalMinutes : null;
+}
 
 // Slash Commands Configuration
 const commands = [
@@ -99,7 +129,7 @@ const commands = [
                 .setName('start')
                 .setDescription('Starts a giveaway inside the server.')
                 .addStringOption(option => option.setName('prize').setDescription('What is the giveaway prize?').setRequired(true))
-                .addIntegerOption(option => option.setName('duration').setDescription('Giveaway duration in minutes (Max: 525600)').setRequired(true).setMinValue(1).setMaxValue(525600))
+                .addStringOption(option => option.setName('duration').setDescription('Duration (e.g., 1y, 1m, 1d, 1h, 1min, or "1d 12h")').setRequired(true))
                 .addIntegerOption(option => option.setName('winners').setDescription('Number of possible winners').setRequired(true).setMinValue(1)))
         .addSubcommand(subcommand =>
             subcommand
@@ -130,7 +160,7 @@ function saveGiveaways() {
     for (const [messageId, data] of activeGiveaways.entries()) {
         dataToSave[messageId] = {
             ...data,
-            entrants: Array.from(data.entrants) // Convert Set to Array for JSON saving
+            entrants: data.entrants instanceof Set ? Array.from(data.entrants) : data.entrants
         };
     }
     fs.writeFileSync(GIVEAWAYS_FILE, JSON.stringify(dataToSave, null, 4));
@@ -144,12 +174,11 @@ function loadGiveaways() {
             const nowElement = Math.floor(Date.now() / 1000);
             
             for (const [messageId, data] of Object.entries(parsed)) {
-                // Garbage Collection: Do not load giveaways that ended more than 7 days ago
                 if (data.ended && (nowElement - data.endTimestamp > SEVEN_DAYS_SECONDS)) {
                     continue; 
                 }
                 
-                data.entrants = new Set(data.entrants); // Convert Array back to Set
+                data.entrants = new Set(Array.isArray(data.entrants) ? data.entrants : []);
                 activeGiveaways.set(messageId, data);
             }
             console.log(`📂 Loaded ${activeGiveaways.size} active/recent giveaways from storage.`);
@@ -163,7 +192,6 @@ function loadGiveaways() {
 client.once('ready', async () => {
     console.log(`⚡ Logged in as ${client.user.tag}!`);
     
-    // Load giveaways before doing anything else
     loadGiveaways(); 
 
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
@@ -178,7 +206,11 @@ client.once('ready', async () => {
         console.error('Error registering application commands:', error);
     }
 
-    setInterval(checkGiveaways, 60000);
+    // Run immediate check upon bot boot
+    await checkGiveaways();
+
+    // Check every 10 seconds for precise giveaway expirations
+    setInterval(checkGiveaways, 10000);
 });
 
 async function endGiveaway(messageId, giveawayData, forcedWinnerUser = null) {
@@ -236,7 +268,6 @@ async function endGiveaway(messageId, giveawayData, forcedWinnerUser = null) {
     } catch (err) {
         console.error("Error processing giveaway termination handler:", err);
     } finally {
-        // Save the updated "ended" status to the file
         saveGiveaways();
     }
 }
@@ -249,7 +280,6 @@ async function checkGiveaways() {
         if (!data.ended && nowElement >= data.endTimestamp) {
             await endGiveaway(messageId, data);
         } else if (data.ended && (nowElement - data.endTimestamp > SEVEN_DAYS_SECONDS)) {
-            // Garbage Collection: Delete memory & file trace of giveaways over 7 days old
             activeGiveaways.delete(messageId);
             memoryChanged = true;
         }
@@ -359,12 +389,21 @@ client.on('interactionCreate', async interaction => {
 
             if (subcommand === 'start') {
                 const prize = options.getString('prize');
-                const duration = options.getInteger('duration');
+                const durationInput = options.getString('duration');
                 const winnerCount = options.getInteger('winners');
+
+                const durationInMinutes = parseDurationToMinutes(durationInput);
+
+                if (!durationInMinutes) {
+                    return interaction.reply({
+                        content: '❌ Invalid duration format! Use formats like `1y`, `1m` (month), `1d`, `1h`, `1min`, or combined forms like `1d 12h`.',
+                        flags: [MessageFlags.Ephemeral]
+                    });
+                }
 
                 await interaction.reply({ content: '🎉 Creating giveaway event panel...', flags: [MessageFlags.Ephemeral] });
 
-                const endTime = Math.floor((Date.now() + duration * 60 * 1000) / 1000);
+                const endTime = Math.floor((Date.now() + durationInMinutes * 60 * 1000) / 1000);
 
                 const giveawayEmbed = new EmbedBuilder()
                     .setTitle('🎁 MIWA HUB GIVEAWAY 🎁')
@@ -398,7 +437,6 @@ client.on('interactionCreate', async interaction => {
                     guildId: interaction.guild.id
                 });
                 
-                // Instantly save to file 
                 saveGiveaways();
             }
 
@@ -475,7 +513,7 @@ client.on('interactionCreate', async interaction => {
                 }
 
                 activeGiveaways.delete(messageId);
-                saveGiveaways(); // Flush memory removal to file
+                saveGiveaways(); 
                 
                 return interaction.editReply(`🛑 Successfully canceled the giveaway setup! The instance has been removed from active registries.`);
             }
@@ -554,9 +592,13 @@ client.on('interactionCreate', async interaction => {
             if (!giveawayData) return interaction.reply({ content: '❌ Error: Giveaway configuration could not be loaded from memory.', flags: [MessageFlags.Ephemeral] });
             if (giveawayData.ended) return interaction.reply({ content: '❌ This giveaway event has already closed processing pipelines.', flags: [MessageFlags.Ephemeral] });
 
+            if (!(giveawayData.entrants instanceof Set)) {
+                giveawayData.entrants = new Set(giveawayData.entrants);
+            }
+
             if (giveawayData.entrants.has(interaction.user.id)) {
                 giveawayData.entrants.delete(interaction.user.id);
-                saveGiveaways(); // Save new entrant count
+                saveGiveaways(); 
                 
                 const updatedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
                     .setFooter({ text: `Entries: ${giveawayData.entrants.size}` });
@@ -566,7 +608,7 @@ client.on('interactionCreate', async interaction => {
             }
 
             giveawayData.entrants.add(interaction.user.id);
-            saveGiveaways(); // Save new entrant count
+            saveGiveaways(); 
             
             const updatedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
                 .setFooter({ text: `Entries: ${giveawayData.entrants.size}` });
